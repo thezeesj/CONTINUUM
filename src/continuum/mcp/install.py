@@ -78,6 +78,46 @@ INSTALL_COMMAND = 'pip install "continuum-agent[mcp]"'
 #: How long the SDK probe may run before the install gives up on it.
 PROBE_TIMEOUT_SECONDS = 30.0
 
+
+def _vscode_user_settings(platform: str = sys.platform) -> str:
+    """VS Code's user ``settings.json``, on the platform that will read it.
+
+    VS Code keeps that file in a different directory on every platform, and the
+    three are documented verbatim at
+    https://code.visualstudio.com/docs/configure/settings:
+
+    - Windows: ``%APPDATA%\\Code\\User\\settings.json``
+    - macOS: ``$HOME/Library/Application Support/Code/User/settings.json``
+    - Linux: ``$HOME/.config/Code/User/settings.json``
+
+    The profile used to spell only the macOS path, so on Windows and Linux
+    ``mcp install --host vscode`` wrote the registration into a file no VS Code
+    reads, created that macOS-style tree under the user's profile to do it, and
+    reported ``status: installed`` (issue #1604).
+
+    ``platform`` is a parameter rather than read off ``sys.platform`` in the
+    body so the per-platform expectations are testable from one machine; the
+    profile below binds it at import with the default. Windows resolves to an
+    absolute path (``%APPDATA`` already is one) and POSIX to a ``~``-relative
+    string every consumer of the profile expands the same way, so no caller
+    needs to know this entry is computed. A session without ``APPDATA`` (a
+    service account, a hardened shell) falls back to the same directory under
+    the profile home rather than to a guess.
+
+    ``XDG_CONFIG_HOME`` is deliberately not honored on Linux. VS Code's own
+    documentation names ``$HOME/.config/Code`` with no XDG qualifier, and
+    upstream microsoft/vscode#38476 records that the Linux builds hardcode
+    that directory. Honoring a variable VS Code ignores would write the
+    registration somewhere VS Code does not look, which is the bug this fixes.
+    """
+    if platform == "win32":
+        appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return str(Path(appdata) / "Code" / "User" / "settings.json")
+    if platform == "darwin":
+        return "~/Library/Application Support/Code/User/settings.json"
+    return "~/.config/Code/User/settings.json"
+
+
 #: Per-host wiring profiles, structured the way ``CLIENT_PROFILES`` is
 #: (``src/continuum/clienthooks.py``): everything that differs between hosts
 #: is data, not code. ``project_settings`` is the committed, per-project file
@@ -151,8 +191,14 @@ HOST_PROFILES: dict[str, dict[str, str]] = {
     },
     "vscode": {
         "project_settings": ".vscode/mcp.json",
-        "local_settings": "~/Library/Application Support/Code/User/settings.json",
-        "user_settings": "~/Library/Application Support/Code/User/settings.json",
+        # VS Code has no per-project user settings file at all, unlike Claude
+        # Code's ``~/.claude.json`` with its ``projects`` key, so the local and
+        # user scopes are the same file: the one VS Code reads on this platform
+        # (``_vscode_user_settings``). Pointing a "local" scope anywhere else
+        # would make the default scope write where no VS Code looks, which is
+        # the failure mode issue #1604 reported.
+        "local_settings": _vscode_user_settings(),
+        "user_settings": _vscode_user_settings(),
         "local_projects_key": "mcpServers",
         "mutating_clients": "vscode",
         "format": "json",
