@@ -281,6 +281,25 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
+- **Protected calls record their arguments, so semantic replay and fork
+  matching see protected nodes (#2031).** `replayguard.protected_call`
+  claimed with `{}`, while claims opened through `continuum_intercept_action`
+  and `adapters/generic.py` carried the real `arguments`, so two classes of
+  claim for the same kind of work carried different ledger rows. Every
+  consumer that reads `action.arguments` was blind to the protected ones:
+  the semantic replay matching of #1029 scored 0.0 against an empty row for
+  any input, so work that had already completed under `protected_call` was
+  denied as unclaimed, re-routed through intercept, and the side effect fired
+  a second time, the precise ACRFence hazard #1029 exists to stop; and
+  `detect_fork_candidates` (#259) derived identity tokens from an empty dict,
+  so the neighbour scan never saw the resources a protected node touched.
+  `protected_call` now accepts the call's `arguments` (forwarded to `claim`,
+  with the explicit key still the identity, exactly as for an intercept
+  claim) and an optional `similarity` config handed to `evaluate`, and
+  `langgraph_protected_node` records the state fields its identity hash is
+  derived from and accepts `similarity` too. Call sites that pass neither are
+  unchanged.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound

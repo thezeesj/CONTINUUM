@@ -276,6 +276,8 @@ def protected_call(
     fn: Callable[..., Any],
     args: tuple[Any, ...] | None = None,
     kwargs: dict[str, Any] | None = None,
+    arguments: Mapping[str, Any] | None = None,
+    similarity: Any | None = None,
 ) -> tuple[GuardKind, Any]:
     """Execute ``fn`` under a claim keyed by ``key``, with memoisation.
 
@@ -283,6 +285,14 @@ def protected_call(
     dict-shaped result is journaled; a later identical call returns
     (SKIP_DUPLICATE, prior_result) without executing. Uncertain or unclaimed
     states raise ReplayBlocked rather than guessing.
+
+    ``arguments`` are the call's own arguments (issue #2031): they are
+    recorded on the claim, so the ledger row a protected call opens carries
+    the same shape of evidence the intercept path records, and the consumers
+    that read ``action.arguments`` (semantic replay matching #1029, fork
+    detection #259) see the work instead of an empty row. ``similarity`` opts
+    the call into that semantic matching. Both default to leaving the
+    behaviour of a caller that supplies neither unchanged.
     """
     from continuum.actions import ActionLedger
 
@@ -292,13 +302,18 @@ def protected_call(
         rendered_key=key,
         run_id=run_id,
         actions_by_key=actions,
+        similarity=similarity,
+        arguments=arguments,
     )
     ledger = ActionLedger(storage, run_id)
 
     # Open a slot on first sight (graph nodes are their own claim point);
     # reuse the live slot when a previous attempt was interrupted mid-call.
+    # The claim carries the call's arguments so the row it opens records the
+    # work it stands for (issue #2031); the explicit key stays the identity,
+    # exactly as for an intercept-path claim.
     if decision.kind is GuardKind.DENY_UNCLAIMED:
-        outcome = ledger.claim(action_type, {}, key=key)
+        outcome = ledger.claim(action_type, dict(arguments or {}), key=key)
         key_to_use: str = outcome.key
     else:
         assert decision.key is not None, decision
@@ -359,6 +374,7 @@ def langgraph_protected_node(
     *,
     action_type: str | None = None,
     key_fields: list[str] | None = None,
+    similarity: Any | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorate a LangGraph node so it executes at most once per identity.
 
@@ -366,6 +382,11 @@ def langgraph_protected_node(
     the JSON-serialisable subset of its input state. On replay after an
     interrupt/crash, a completed node is skipped and its journalled result is
     returned to the graph instead of re-firing the node's side effects.
+
+    The claim records the state fields the identity is derived from as its
+    arguments (issue #2031), so a protected node's ledger row carries the
+    input it acted on. ``similarity`` opts the node into semantic replay
+    matching (#1029) the way a configured tool is opted in at the gate.
     """
     import hashlib
 
@@ -373,22 +394,31 @@ def langgraph_protected_node(
         """Wrap a node function with identity calculation and replay protection."""
         node_name = getattr(fn, "__name__", "node")
 
+        def node_basis(state: dict[str, Any]) -> dict[str, Any]:
+            """The state fields this node's identity is derived from.
+
+            What the identity hash covers is also what the claim records as
+            its arguments (issue #2031): the row a protected node opens has to
+            describe the input it acted on, or the readers that consume
+            ``action.arguments`` (semantic replay #1029, fork detection #259)
+            see an empty row for every node claim.
+            """
+            if key_fields:
+                return {k: state.get(k) for k in key_fields}
+            # The whole state is the identity, not just its scalar fields.
+            # Filtering to str/int/float/bool silently dropped list/dict
+            # values, so two invocations differing only in a non-scalar
+            # field (the common LangGraph case, e.g. ``{"messages": [...]}``,
+            # which has no scalar fields at all) hashed to the same key and
+            # every call after the first was skipped as a duplicate --
+            # memoised output returned in place of a genuine execution.
+            # ``json.dumps(..., default=str)`` already serialises non-scalars
+            # deterministically, so include them.
+            return dict(sorted(state.items()))
+
         def identity(state: dict[str, Any]) -> str:
             """Compute a stable idempotency key for node execution from state."""
-            if key_fields:
-                basis = {k: state.get(k) for k in key_fields}
-            else:
-                # The whole state is the identity, not just its scalar fields.
-                # Filtering to str/int/float/bool silently dropped list/dict
-                # values, so two invocations differing only in a non-scalar
-                # field (the common LangGraph case, e.g. ``{"messages": [...]}``,
-                # which has no scalar fields at all) hashed to the same key and
-                # every call after the first was skipped as a duplicate --
-                # memoised output returned in place of a genuine execution.
-                # ``json.dumps(..., default=str)`` already serialises non-scalars
-                # deterministically, so include them.
-                basis = dict(sorted(state.items()))
-            blob = json.dumps(basis, sort_keys=True, default=str)
+            blob = json.dumps(node_basis(state), sort_keys=True, default=str)
             digest = hashlib.sha256(blob.encode()).hexdigest()[:16]
             return f"node:{node_name}:{digest}"
 
@@ -400,6 +430,8 @@ def langgraph_protected_node(
                 action_type=action_type or f"node.{node_name}",
                 key=identity(state),
                 fn=lambda: fn(state),
+                arguments=node_basis(state),
+                similarity=similarity,
             )
             if kind is GuardKind.SKIP_DUPLICATE:
                 marker = {"replayed": True}
