@@ -281,6 +281,26 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
+- **The StateExtractor seam can carry the trust watermark its base folded
+  with (#2039).** `#1933` seeded the watermark for the two shipped resume
+  paths, but the exported extraction seam laundered the same way with no way
+  to do the right thing: `ExtractionContext` carried no field for the seed,
+  so `DeterministicExtractor.extract` folded onto the base unseeded and fell
+  back to the per-fact approximation, stamping a derived fact appended after
+  a weak non-projecting event DETERMINISTIC where a fresh read of the same
+  log stamped it EXTERNAL_AGENT, breaking the incremental==full invariant on
+  the seam `plugins/seams.py` documents as the extension point.
+  `ExtractionContext` takes an optional `weakest_seed`, which
+  `DeterministicExtractor` passes through to `project_incremental`, and
+  `CompositeExtractor` forwards the accumulated watermark between stages
+  rather than the caller's seed, which the first stage's fold has already
+  weakened further. `weakest_origin_over` is exported from `continuum.state`
+  and `continuum` so a caller holding the log can compute the exact seed next
+  to the seam it feeds. Callers without a log keep today's behaviour; the
+  regression is latent (no in-repo caller passes a base with a non-empty
+  trajectory) but the seam is public API whose docstring advertises the
+  base-plus-tail shape.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound
