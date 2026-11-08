@@ -281,6 +281,16 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
+- **`render_dashboard` marks a PARTIAL component as degraded instead of
+  unknown (#2038).** `_STATUS_SYMBOL` mapped every `StateStatus` to a
+  dashboard marker except `PARTIAL`, so context-compacted evidence (folded
+  before a compaction boundary by `_apply_compaction_status`) rendered
+  through the `[??]` fallback, byte-identical to a genuinely `UNKNOWN` or
+  `REQUIRES_REVIEW` component: the one reading that means "we could not
+  tell". `PARTIAL` now renders `[~~]`, and a test pins the table against the
+  full enum so a status added later fails loudly until it gets a deliberate
+  marker instead of silently falling back.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound
