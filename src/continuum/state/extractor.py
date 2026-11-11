@@ -296,12 +296,21 @@ class CompositeExtractor:
         watermark that accumulated state holds: the first stage's fold has
         weakened the caller's seed by every event it consumed, and a downstream
         extractor that stamps derived provenance must not launder that away
-        (#2039).
+        (#2039). As the pipeline advances across multi-stage chains, the seed
+        incorporates the evolving state's weakest origin to maintain
+        monotonicity across intermediate stages.
         """
         first, *rest = self._extractors
         state = first.extract(context)
         weakest_seed = _accumulated_weakest(context)
         for extractor in rest:
+            state_weakest = _weakest_from_state(state)
+            if state_weakest is not None:
+                weakest_seed = (
+                    derived_origin([weakest_seed, state_weakest])
+                    if weakest_seed is not None
+                    else state_weakest
+                )
             state = extractor.extract(
                 ExtractionContext(
                     run_id=context.run_id,

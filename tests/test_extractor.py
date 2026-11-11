@@ -461,3 +461,42 @@ def test_nothing_folded_leaves_downstream_unseeded() -> None:
     from continuum.state.extractor import _accumulated_weakest
 
     assert _accumulated_weakest(ExtractionContext(run_id="run_1", trajectory=())) is None
+
+
+def test_composite_accumulates_watermark_across_intermediate_stages() -> None:
+    """Intermediate stages with weaker facts must constrain downstream stages (#2039, #2044).
+
+    When a composite pipeline has three or more stages and an intermediate stage
+    introduces facts with a weaker origin (such as an LLMExtractor introducing
+    Origin.LLM candidate facts), subsequent stages in the pipeline must receive
+    a watermark that incorporates the evolving state rather than remaining at the
+    initial seed.
+    """
+    composite = CompositeExtractor(
+        [
+            DeterministicExtractor(),
+            LLMExtractor(
+                llm=lambda ctx, st: LLMProposal(
+                    decisions=[{"decision_id": "d_llm", "decision": "proposal"}]
+                )
+            ),
+            _DerivingExtractor(),
+        ]
+    )
+
+    ctx = ExtractionContext(
+        run_id="run_1",
+        trajectory=(
+            Event(
+                run_id="run_1",
+                sequence=1,
+                type=EventType.RUN_STARTED,
+                source=Origin.DETERMINISTIC,
+                payload={"goal": "g"},
+            ),
+        ),
+    )
+    state = composite.extract(ctx)
+    assert any(d.decision_id == "d_llm" for d in state.decisions)
+    assert state.evidence[-1].evidence_id == "ev_derived"
+    assert state.evidence[-1].provenance.origin is Origin.EXTERNAL_AGENT
