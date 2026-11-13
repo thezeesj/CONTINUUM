@@ -414,6 +414,139 @@ def test_watch_mints_recovered_after_compaction(tmp_path: Path) -> None:
         assert len(recovered) == 1, "recovery of an archived episode must be recorded"
 
 
+def test_compaction_does_not_restart_the_silence_clock(tmp_path: Path) -> None:
+    """A compaction mid-silence must not make a still-silent run read healthy (#2088).
+
+    ``compact_run`` appends fresh anchor markers (``STATE_CHECKPOINTED`` with
+    trigger=compaction, then ``EVENT_LOG_ANCHORED``) and moves the older
+    prefix into ``events_archive``. The silence clock used to read the live
+    tail only, so after compaction the newest live event was the marker and
+    the clock restarted from compaction time: a run silent for hours read
+    ``silence ~ 0, breached=False``, the engine dropped its WAIT proposal
+    for ``resume``, and the archive-aware episode scan mints
+    ``LIVENESS_RECOVERED`` for a run that never resumed.
+    """
+    db = str(tmp_path / "watch_silence_compact.db")
+    run_id = "run_watch_silence_compact"
+    old_ts = datetime.now(UTC) - timedelta(hours=3)
+    with SQLiteStorage(db) as store:
+        store.create_run_started(Run(run_id=run_id, goal="silence survives compaction"))
+        _append_timed(store, run_id, EventType.WORK_COMPLETED, {"doc": 0}, old_ts)
+
+    # watch records the breach, minting DETECTED at wall-clock now.
+    out, err = io.StringIO(), io.StringIO()
+    code = main(
+        ["--db", db, "watch", run_id, "--max-silence", "3600", "--on-breach", "exit"],
+        out=out,
+        err=err,
+    )
+    assert code == 20, out.getvalue()
+
+    with SQLiteStorage(db) as store:
+        store.compact_run(run_id)
+        # The setup must put the clock's old enemies where the fix expects
+        # them: the live tail ends on the anchor marker, the real work (and
+        # the DETECTED episode) lives in the archive.
+        assert store.read_events(run_id)[-1].type is EventType.EVENT_LOG_ANCHORED
+        archived_types = {e.type for e in store.read_archived_events(run_id)}
+        assert EventType.WORK_COMPLETED in archived_types
+
+    from continuum.recovery.health import advisory_for_storage
+
+    with SQLiteStorage(db) as store:
+        advisory = advisory_for_storage(store, run_id)
+        assert advisory["breached"] is True
+        assert advisory["silence_seconds"] > 3600, advisory
+        assert RecoveryEngine(store).assess(run_id).mode.value == "wait"
+
+    # The archived DETECTED is still the open episode: the still-silent run
+    # must not mint LIVENESS_RECOVERED, nor a duplicate DETECTED.
+    out, err = io.StringIO(), io.StringIO()
+    code = main(
+        ["--db", db, "watch", run_id, "--max-silence", "3600", "--on-breach", "exit"],
+        out=out,
+        err=err,
+    )
+    assert code == 20, out.getvalue()
+    with SQLiteStorage(db) as store:
+        detected = [
+            e
+            for e in store.read_all_events(run_id)
+            if e.type is EventType.LIVENESS_SILENCE_DETECTED
+        ]
+        recovered = [
+            e for e in store.read_all_events(run_id) if e.type is EventType.LIVENESS_RECOVERED
+        ]
+        assert len(detected) == 1, "the archived episode must not be duplicated"
+        assert not recovered, "a still-silent run must not be recorded as recovered"
+
+
+def test_watch_sustains_a_breach_across_invocations(tmp_path: Path) -> None:
+    """A breach episode must outlive the watch call that opened it (#2088).
+
+    watch appends ``LIVENESS_SILENCE_DETECTED`` as its own audit record.
+    When the silence clock counts that marker the observer resets the clock
+    it measures, so the very next invocation sees silence of ~0 and mints
+    ``LIVENESS_RECOVERED`` for a run that never resumed. The liveness
+    markers are observations about the cadence, not evidence of it.
+    """
+    db = str(tmp_path / "watch_sustained.db")
+    run_id = "run_watch_sustained"
+    old_ts = datetime.now(UTC) - timedelta(hours=3)
+    with SQLiteStorage(db) as store:
+        store.create_run_started(Run(run_id=run_id, goal="sustained breach"))
+        _append_timed(store, run_id, EventType.WORK_COMPLETED, {"doc": 0}, old_ts)
+
+    codes: list[int] = []
+    for _ in range(2):
+        out, err = io.StringIO(), io.StringIO()
+        codes.append(
+            main(
+                ["--db", db, "watch", run_id, "--max-silence", "3600", "--on-breach", "exit"],
+                out=out,
+                err=err,
+            )
+        )
+    assert codes == [20, 20], codes
+    with SQLiteStorage(db) as store:
+        detected = [
+            e
+            for e in store.read_all_events(run_id)
+            if e.type is EventType.LIVENESS_SILENCE_DETECTED
+        ]
+        recovered = [
+            e for e in store.read_all_events(run_id) if e.type is EventType.LIVENESS_RECOVERED
+        ]
+        assert len(detected) == 1, "a sustained episode needs no second DETECTED"
+        assert not recovered, "a run that never resumed is not recovered"
+
+
+def test_a_manual_checkpoint_still_anchors_the_silence_clock(tmp_path: Path) -> None:
+    """Only the compaction-anchor checkpoint is bookkeeping, not every one (#2088).
+
+    The clock skips ``STATE_CHECKPOINTED`` by trigger, not by type: a manual
+    checkpoint is operator interaction with the run and must count as
+    activity, or every freshly checkpointed run would read as silent.
+    """
+    from continuum.checkpoint import CheckpointManager
+
+    db = str(tmp_path / "watch_manual_checkpoint.db")
+    run_id = "run_watch_manual_checkpoint"
+    old_ts = datetime.now(UTC) - timedelta(hours=3)
+    with SQLiteStorage(db) as store:
+        store.create_run_started(Run(run_id=run_id, goal="manual checkpoint"))
+        _append_timed(store, run_id, EventType.WORK_COMPLETED, {"doc": 0}, old_ts)
+        CheckpointManager(store).checkpoint(run_id)
+        assert store.read_events(run_id)[-1].type is EventType.STATE_CHECKPOINTED
+
+    from continuum.recovery.health import advisory_for_storage
+
+    with SQLiteStorage(db) as store:
+        advisory = advisory_for_storage(store, run_id)
+        assert advisory["breached"] is False
+        assert advisory["silence_seconds"] < 3600, advisory
+
+
 def test_watch_falls_back_to_the_live_tail_when_the_archive_is_unreadable(
     tmp_path: Path,
 ) -> None:

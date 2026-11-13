@@ -106,7 +106,14 @@ your own secret path or bearer check.
   exits 20. Advisory here means "never auto-rollback", not "cannot block you".
 - The threshold is a gate you set, not a passive annotation. A low
   `max_silence_seconds` will turn otherwise-green runs into blocked ones.
-- Silence is measured from the last event timestamp with an injected clock,
-  so the check is deterministic and testable, not wall-clock flaky.
+- Silence is measured from the newest event that counts as run activity,
+  with an injected clock so the check is deterministic and testable, not
+  wall-clock flaky. The scan walks full history, archive included, so
+  compacting a silent run cannot restart the clock from compaction time,
+  and the bookkeeping the machinery appends on its own (the anchor markers
+  `compact` leaves, and the `DETECTED`/`RECOVERED` pair `watch` itself
+  records) does not count as activity. A run that went quiet stays breached
+  until it emits again; the audit pair brackets the silent interval rather
+  than ending it.
 - A run with no events at all is never breached: there is no silence to
   measure yet.
