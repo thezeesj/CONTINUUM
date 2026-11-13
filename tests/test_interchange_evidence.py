@@ -95,30 +95,185 @@ def test_truncation_is_detectable() -> None:
         _make_run(store)
         primitives = export_evidence(store, "run_1")
         assert verify_export(primitives) is True
+        assert (
+            verify_export(
+                primitives,
+                expected_count=len(primitives),
+                expected_head=primitives[-1].content_hash,
+            )
+            is True
+        )
         # Drop a middle line, so sequence and prev_hash break
         truncated = primitives[:2] + primitives[3:]
         assert verify_export(truncated) is False
-        # Tail truncation is detectable by length and final hash mismatch
-        # (a prefix is internally consistent but the receiver knows the
-        # expected count/final hash from verify() and will see a mismatch).
+        # Tail truncation is detected when expected stream bounds are verified.
         tail_truncated = primitives[:-1]
         assert len(tail_truncated) != len(primitives)
         assert tail_truncated[-1].content_hash != primitives[-1].content_hash
-        # The truncated prefix itself is still internally consistent when
-        # checked in isolation (as any prefix of a valid chain is), but its
-        # final hash does not match the full chain's head, which is how the
-        # receiver detects truncation against the store's head hash.
-        # Tamper a payload: verify_export takes the serialized shape too, so
-        # model_dump() is what a receiver would hand it after editing a line.
-        tampered = [p.model_dump() for p in primitives]
-        tampered[1]["payload"] = {"tampered": True}
-        # Recompute would fail because content_hash no longer matches signature
-        # but our verify checks content_hash vs stable_hash(signature_inputs);
-        # tampering payload without updating signature_inputs will still pass
-        # that check, but we also need to check that content_hash was derived
-        # from the original event. To simulate tampering of the hash itself:
-        tampered[1]["content_hash"] = "0" * 64
+        assert verify_export(tail_truncated, expected_count=len(primitives)) is False
+        assert (
+            verify_export(
+                tail_truncated,
+                expected_head=primitives[-1].content_hash,
+            )
+            is False
+        )
+        # Tampering readable payload alone is detected without modifying hashes
+        tampered_payload = [p.model_dump() for p in primitives]
+        tampered_payload[1]["payload"] = {"tampered": True}
+        assert verify_export(tampered_payload) is False
+        # Tampering the content hash itself is also detected
+        tampered_hash = [p.model_dump() for p in primitives]
+        tampered_hash[1]["content_hash"] = "0" * 64
+        assert verify_export(tampered_hash) is False
+
+
+def test_verify_export_rejects_tampered_readable_fields() -> None:
+    with SQLiteStorage(":memory:") as store:
+        store.create_run(Run(run_id="run_1", goal="test goal"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "test goal"})
+        store.append_event(
+            "run_1",
+            EventType.TOOL_CALLED,
+            {"tool": "bash", "command": "ls"},
+            source=Origin.EXTERNAL_AGENT,
+        )
+        store.append_event(
+            "run_1",
+            EventType.DEPENDENCY_DECLARED,
+            {"resource": "res_1", "version": "1.0.0", "evidence": ["ev_1"]},
+        )
+        store.append_event(
+            "run_1",
+            EventType.STATE_CHECKPOINTED,
+            {"checkpoint_id": "cp_1", "version": 2, "trigger": "step"},
+        )
+        primitives = export_evidence(store, "run_1")
+        assert verify_export(primitives) is True
+
+        base = [p.model_dump() for p in primitives]
+
+        # 1. Tampering origin (e.g. promoting external_agent to human)
+        tampered = [dict(d) for d in base]
+        tampered[1]["origin"] = "human"
         assert verify_export(tampered) is False
+
+        # 2. Tampering timestamp
+        tampered = [dict(d) for d in base]
+        tampered[0]["timestamp"] = "1970-01-01T00:00:00+00:00"
+        assert verify_export(tampered) is False
+
+        # 3. Tampering run_id
+        tampered = [dict(d) for d in base]
+        tampered[0]["run_id"] = "tampered_run"
+        assert verify_export(tampered) is False
+
+        # 4. Tampering event_id
+        tampered = [dict(d) for d in base]
+        tampered[0]["event_id"] = "fake_event_id"
+        assert verify_export(tampered) is False
+
+        # 5. Tampering event_type
+        tampered = [dict(d) for d in base]
+        tampered[0]["event_type"] = "RUN_FAILED"
+        assert verify_export(tampered) is False
+
+        # 6. Tampering kind
+        tampered = [dict(d) for d in base]
+        tampered[0]["kind"] = "observation"
+        assert verify_export(tampered) is False
+
+        # 7. Tampering observation observed_at
+        obs_idx = next(i for i, p in enumerate(base) if p["kind"] == "observation")
+        tampered = [dict(d) for d in base]
+        tampered[obs_idx]["observed_at"] = "1970-01-01T00:00:00+00:00"
+        assert verify_export(tampered) is False
+
+        # 8. Tampering relation source_id and target_id
+        rel_idx = next(i for i, p in enumerate(base) if p["kind"] == "relation")
+        tampered = [dict(d) for d in base]
+        tampered[rel_idx]["source_id"] = "tampered_source"
+        assert verify_export(tampered) is False
+
+        tampered = [dict(d) for d in base]
+        tampered[rel_idx]["target_id"] = "tampered_target"
+        assert verify_export(tampered) is False
+
+        # 9. Tampering checkpoint fields (checkpoint_id, version, trigger)
+        cp_idx = next(i for i, p in enumerate(base) if p["kind"] == "checkpoint")
+        tampered = [dict(d) for d in base]
+        tampered[cp_idx]["checkpoint_id"] = "tampered_cp"
+        assert verify_export(tampered) is False
+
+        tampered = [dict(d) for d in base]
+        tampered[cp_idx]["version"] = 999
+        assert verify_export(tampered) is False
+
+        tampered = [dict(d) for d in base]
+        tampered[cp_idx]["trigger"] = "tampered_trigger"
+        assert verify_export(tampered) is False
+
+
+def test_verify_export_checkpoint_record_primitive() -> None:
+    from continuum.models import Goal, StateCheckpoint
+    from continuum.state.semantic import SemanticState
+
+    state = SemanticState(run_id="run_1", goal=Goal(description="goal"))
+    cp = StateCheckpoint(
+        checkpoint_id="cp_rec_1",
+        run_id="run_1",
+        version=1,
+        trigger="manual",
+        state=state,
+    ).sealed()
+    prim = EvidencePrimitive.for_checkpoint(cp, sequence=1, prev_hash=None)
+    assert verify_export([prim]) is True
+
+    # Tamper checkpoint_id
+    tampered = [prim.model_dump()]
+    tampered[0]["checkpoint_id"] = "other_id"
+    assert verify_export(tampered) is False
+
+    # Tamper version
+    tampered = [prim.model_dump()]
+    tampered[0]["version"] = 42
+    assert verify_export(tampered) is False
+
+    # Tamper trigger
+    tampered = [prim.model_dump()]
+    tampered[0]["trigger"] = "automatic"
+    assert verify_export(tampered) is False
+
+    # Tamper timestamp
+    tampered = [prim.model_dump()]
+    tampered[0]["timestamp"] = "1970-01-01T00:00:00+00:00"
+    assert verify_export(tampered) is False
+
+    # Tamper origin
+    tampered = [prim.model_dump()]
+    tampered[0]["origin"] = "human"
+    assert verify_export(tampered) is False
+
+    # Tamper payload
+    tampered = [prim.model_dump()]
+    tampered[0]["payload"] = {"checkpoint_id": "cp_rec_1", "version": 2, "trigger": "manual"}
+    assert verify_export(tampered) is False
+
+    # Tamper integrity_hash
+    tampered = [prim.model_dump()]
+    tampered[0]["integrity_hash"] = "0" * 64
+    assert verify_export(tampered) is False
+
+
+def test_verify_export_bounds_and_edge_cases() -> None:
+    assert verify_export([]) is True
+    assert verify_export([], expected_count=0) is True
+    assert verify_export([], expected_count=1) is False
+    assert verify_export([], expected_head="abc") is False
+
+    # Non-mapping or corrupt item
+    assert verify_export(["not-a-mapping"]) is False
+    assert verify_export([{"sequence": 1, "signature_inputs": None}]) is False
 
 
 def test_four_primitive_kinds_present() -> None:
