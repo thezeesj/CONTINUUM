@@ -423,6 +423,42 @@ def test_falsifiable_restore_skipping_unsettled_claim_refuses_like_fork() -> Non
 
 
 @pytest.mark.parametrize("edit_type", EDIT_TYPES)
+def test_unreadable_action_row_does_not_crash_the_gate(edit_type: str) -> None:
+    """An unreadable action payload is skipped, so the gate still decides.
+
+    A non-dict ``action`` row is writable through the public append seam and
+    every consumer of the ledger tolerates it. Before #2090 the same row made
+    ``approve_restore``/``approve_fork`` (and the restore and rewind paths
+    behind them) raise a raw pydantic ``ValidationError`` out of the read-only
+    fold -- neither a refusal nor a derivation. The gate now evaluates the
+    edit, and since the ledger tracks no slot for the row, nothing is
+    derivable from it, so the edit is benign.
+    """
+    storage = _make_storage()
+    try:
+        storage.append_event(
+            "run_1",
+            EventType.ACTION_RECORDED,
+            {"key": "k1", "action": "not-a-dict"},
+        )
+        # The fold skips the row, so every edit type evaluates the span.
+        for et in EDIT_TYPES:
+            check_preconditions(storage, "run_1", 0, edit_type=et)  # should not raise
+        result = EDIT_CALLS[edit_type](storage, "run_1", reason="unreadable row")
+        assert result is not None
+        events = storage.read_events("run_1")
+        lineage = [
+            e
+            for e in events
+            if e.type in {EventType.RUN_FORKED, EventType.RUN_RESTORED, EventType.RUN_MERGED}
+        ][-1]
+        for key in ("preconditions", "precondition_summary", "derivation", "derivation_summary"):
+            assert lineage.payload[key]["uncertain_slots"] == []
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("edit_type", EDIT_TYPES)
 def test_refusal_raises_edit_type_specific_subclass(edit_type: str) -> None:
     """The gate raises the subclass matching ``edit_type``, never the base (#1114).
 
