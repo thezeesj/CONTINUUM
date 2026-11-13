@@ -723,6 +723,14 @@ class AuthorityReconciled(BaseModel):
     Records the probe's verdict about whether a previously consumed authority
     is still valid on the external system. The event is hash-chained and
     never deduplicates, so the audit trail preserves every probe result.
+    ``probed_at`` is when the probe ran, as an ISO-8601 UTC string, and
+    ``probed_payload`` is the consumption context the probe was handed
+    (issue #647): it links the verdict to the AUTHORITY_CONSUMED row that
+    spent the authority, and that link survives even after the consumption
+    row compacts out of the live tail. Both fields are optional and may be
+    absent on payloads written before #2084 began recording them; the model
+    still validates every AUTHORITY_RECONCILED event the writer has ever
+    appended.
     """
 
     model_config = Frozen
@@ -731,6 +739,7 @@ class AuthorityReconciled(BaseModel):
     valid: bool | None = None
     reason: str = Field(default="")
     probed_at: str = Field(default="")
+    probed_payload: dict[str, Any] | None = None
 
     @field_validator("authority_id")
     @classmethod

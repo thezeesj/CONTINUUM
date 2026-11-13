@@ -331,6 +331,19 @@ Test counts: ~4400 collected on a minimal env.
   trajectory) but the seam is public API whose docstring advertises the
   base-plus-tail shape.
 
+- **AUTHORITY_RECONCILED payloads match the published model, and the probe
+  run is timestamped (#2084).** `settle_authority` appended a hand-rolled
+  payload the published `AuthorityReconciled` model rejects
+  (`extra_forbidden: probed_payload`) while its own `probed_at` field stayed
+  empty, so any verifier validating events through the published models
+  failed on every reconciled authority. The payload is now built through the
+  model before it is appended, and `probed_at` records when the probe ran as
+  an ISO-8601 UTC string. The model was widened rather than narrowed so the
+  audit trail stays readable in both directions: it documents the
+  `probed_payload` consumption context every event has always carried
+  (which consumption, via which action, at which sequence, issue #647), and
+  payloads written before `probed_at` was recorded still validate.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound
