@@ -330,6 +330,20 @@ Test counts: ~4400 collected on a minimal env.
   regression is latent (no in-repo caller passes a base with a non-empty
   trajectory) but the seam is public API whose docstring advertises the
   base-plus-tail shape.
+- **The precondition gate skips an unreadable action row instead of crashing
+  on it (#2090).** A single `ACTION_*` event whose `action` payload is not a
+  valid `Action`, writable through the public `storage.append_event` seam,
+  made `approve_restore` and `approve_fork` (and the `continuum restore` /
+  `fork` and rewind paths behind them) raise a raw pydantic `ValidationError`
+  out of the read-only fold in `derive()`, instead of evaluating the edit.
+  Every other consumer of the same row already tolerates it: the action
+  ledger's fold skips a non-dict `action`, and the gate's own completion
+  folds wrap the identical parse in try/except. `derive()` now guards the
+  parse the same way, so the row contributes no slot and therefore no
+  uncertainty. Tests in `tests/test_edit_preconditions.py` cover the
+  non-dict and missing-payload shapes plus the unpoisoned-slot follow-up,
+  and `tests/test_restore_merge_gate.py` drives all three edit types past
+  the gate with such a row in the log.
 
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,

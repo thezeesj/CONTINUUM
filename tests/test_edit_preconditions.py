@@ -286,6 +286,56 @@ def test_slot_opened_before_the_anchor_is_not_reported(store: SQLiteStorage) -> 
     assert {s.key for s in result.uncertain_slots} == {late.key}
 
 
+# --- unreadable action rows -----------------------------------------------------
+
+
+def test_unreadable_action_payload_is_skipped_not_raised(store: SQLiteStorage) -> None:
+    """A non-dict ``action`` row contributes no slot, and crashes nothing.
+
+    The row is writable through the public ``append_event`` seam and every
+    other consumer tolerates it: ``ActionLedger.all()`` is empty over the same
+    log, and the gate's own completion folds wrap the identical parse. The
+    fold must skip the row too, not raise a ``ValidationError`` out of a
+    read-only derivation (#2090).
+    """
+    store.append_event(
+        RUN_ID,
+        EventType.ACTION_RECORDED,
+        {"key": "k1", "action": "not-a-dict"},
+    )
+    assert derive(store, full_span(store)) == DerivationResult()
+
+
+def test_missing_action_payload_is_skipped_not_raised(store: SQLiteStorage) -> None:
+    """An ``ACTION_*`` row with no ``action`` key at all is skipped likewise."""
+    store.append_event(RUN_ID, EventType.ACTION_RECORDED, {"key": "k1"})
+    assert derive(store, full_span(store)) == DerivationResult()
+
+
+def test_unreadable_action_row_does_not_poison_a_later_record(store: SQLiteStorage) -> None:
+    """A valid record for the same key after an unreadable one still tracks."""
+    store.append_event(
+        RUN_ID,
+        EventType.ACTION_RECORDED,
+        {"key": "k1", "action": "not-a-dict"},
+    )
+    ledger = ActionLedger(store, RUN_ID)
+    outcome = ledger.claim("slack.notify", {"channel": "#ops"}, key="k1")
+    claimed_at = store.last_sequence(RUN_ID)
+    result = derive(store, full_span(store))
+    assert result.uncertain_slots == frozenset(
+        {
+            UncertainSlot(
+                key=outcome.key,
+                action_id=outcome.action.action_id,
+                action_type="slack.notify",
+                status="started",
+                sequence=claimed_at,
+            )
+        }
+    )
+
+
 # --- span edges -----------------------------------------------------------------
 
 

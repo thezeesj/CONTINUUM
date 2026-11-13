@@ -265,7 +265,16 @@ def derive(storage: Storage, edit_point: EditPoint) -> DerivationResult:
             if approval_id:
                 granted.pop(str(approval_id), None)
         elif current_key is not None:
-            action = Action.model_validate(event.payload["action"])
+            # An action row whose payload is unreadable is skipped rather
+            # than raising: ``fold_action_events`` skips a non-dict ``action``
+            # for the same key, and the gate's own completion folds swallow
+            # the identical parse. A read-only fold must not crash out of a
+            # row every other consumer tolerates; the row simply contributes
+            # no slot, so it can contribute no uncertainty either (#2090).
+            try:
+                action = Action.model_validate(event.payload["action"])
+            except Exception:
+                continue
             track = slots.get(current_key)
             slots[current_key] = _SlotTrack(
                 first_seq=track.first_seq if track else event.sequence,
