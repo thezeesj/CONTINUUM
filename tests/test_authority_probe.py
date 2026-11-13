@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import pathlib
 import sys
@@ -12,7 +13,7 @@ import pytest
 from continuum.actions.authority import record_authority_consumed
 from continuum.events import EventType
 from continuum.gate import collect_consumed_authorities, decide
-from continuum.models import RecoveryMode, Run
+from continuum.models import AuthorityReconciled, RecoveryMode, Run
 from continuum.reconcilers import load_reconcilers, settle_authority
 from continuum.recovery.engine import RecoveryEngine
 from continuum.storage import SQLiteStorage
@@ -86,6 +87,88 @@ def test_probe_via_reconcilers_json_valid_true_unblocks(tmp_path: pathlib.Path) 
         assert reconciled[0].payload["authority_id"] == "auth-probe-1"
     finally:
         storage.close()
+
+
+def test_reconciled_payload_validates_through_the_published_model(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The AUTHORITY_RECONCILED payload must satisfy AuthorityReconciled (issue #2084).
+
+    settle_authority used to append a hand-rolled payload the published
+    AuthorityReconciled model rejects (extra_forbidden on probed_payload)
+    while the model's own probed_at stayed empty, so any verifier validating
+    events through the published models failed on every reconciled
+    authority. The writer now builds the payload through the model, so what
+    the hash-chained audit trail keeps is exactly the contract the model
+    publishes, probe timestamp included.
+    """
+    storage = _storage()
+    try:
+        record_authority_consumed(
+            storage, "run_1", "auth-contract-1", consumer_run_id="run_1", via_action_id="act-1"
+        )
+        cfg = tmp_path / "reconcilers.json"
+        cfg.write_text(
+            json.dumps(
+                {
+                    "probes": {
+                        "auth-contract-1": {
+                            "command": _probe_command('{"valid": true}'),
+                            "timeout": 5,
+                        }
+                    }
+                }
+            )
+        )
+        probes = load_reconcilers(cfg)
+        report = settle_authority(storage, "run_1", "auth-contract-1", probes)
+        assert report.settled is True
+
+        events = list(storage.read_events("run_1"))
+        reconciled = [e for e in events if e.type == EventType.AUTHORITY_RECONCILED]
+        assert len(reconciled) == 1
+        # The published model accepts the payload exactly as appended.
+        model = AuthorityReconciled.model_validate(dict(reconciled[0].payload))
+        assert model.authority_id == "auth-contract-1"
+        assert model.valid is True
+        assert model.probed_payload is not None
+        # The probe run is timestamped, and the consumption context the probe
+        # was handed (issue #647) rides along for audit.
+        assert model.probed_at
+        probed_at = _dt.datetime.fromisoformat(model.probed_at)
+        assert probed_at.tzinfo is not None
+        assert model.probed_payload["authority_id"] == "auth-contract-1"
+        assert model.probed_payload["consumer_run_id"] == "run_1"
+        assert model.probed_payload["via_action_id"] == "act-1"
+    finally:
+        storage.close()
+
+
+def test_legacy_reconciled_payload_still_validates() -> None:
+    """Pre-#2084 AUTHORITY_RECONCILED events keep validating (issue #2084).
+
+    Every reconciled event the writer has ever appended carries probed_payload
+    and no probed_at. The published model stays able to validate that shape,
+    so a verifier folding an existing audit trail does not fail on history:
+    today's writer cannot repair the past by changing what it appends now.
+    """
+    legacy = AuthorityReconciled.model_validate(
+        {
+            "authority_id": "auth-legacy",
+            "valid": False,
+            "reason": "valid=false",
+            "probed_payload": {
+                "authority_id": "auth-legacy",
+                "consumer_run_id": "run_1",
+                "via_action_id": None,
+                "consumed_at": "2026-09-12T00:22:54+00:00",
+                "sequence": 3,
+            },
+        }
+    )
+    assert legacy.probed_at == ""
+    assert legacy.probed_payload is not None
+    assert legacy.probed_payload["sequence"] == 3
 
 
 def test_probe_valid_false_keeps_blocked(tmp_path: pathlib.Path) -> None:
