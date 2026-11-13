@@ -28,6 +28,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from continuum.events import EventType
+
 __all__ = [
     "CadenceContract",
     "LivenessResult",
@@ -191,15 +193,59 @@ def load_cadence_contract(path: Path | None = None) -> CadenceContract:
     return CadenceContract.model_validate(data)
 
 
+def _counts_as_activity(ev: Any) -> bool:
+    """Whether ``ev`` is run activity the silence clock measures from.
+
+    The clock must skip the bookkeeping the machinery appends on its own:
+
+    * ``EVENT_LOG_ANCHORED`` and the compaction-anchor ``STATE_CHECKPOINTED``
+      (payload ``trigger == "compaction"``) are maintenance ``compact_run``
+      performs on the log, not work by the run. Skipping only the compaction
+      trigger keeps a manual or recovery checkpoint as the activity it is.
+    * ``LIVENESS_SILENCE_DETECTED`` and ``LIVENESS_RECOVERED`` are observations
+      *about* the cadence, not evidence of it. Counting them hands watch a
+      pen that resets its own clock, so no breach episode could outlive the
+      watch call that opened it, and a sustained breach looks recovered one
+      invocation later.
+
+    Every other recorded event is activity and keeps the clock honest.
+    """
+    from continuum.checkpoint.policy import CheckpointTrigger
+
+    etype = ev.type
+    if etype is EventType.EVENT_LOG_ANCHORED:
+        return False
+    if etype in (EventType.LIVENESS_SILENCE_DETECTED, EventType.LIVENESS_RECOVERED):
+        return False
+    if etype is EventType.STATE_CHECKPOINTED:
+        payload = ev.payload if isinstance(ev.payload, dict) else {}
+        return payload.get("trigger") != CheckpointTrigger.COMPACTION
+    return True
+
+
 def _last_event_ts(storage: Any, run_id: str) -> datetime | None:
-    """Return timestamp of the last event for ``run_id``, or None."""
+    """Return the timestamp of the newest activity event for ``run_id``.
+
+    The scan is archive-aware (``read_all_events``), so the archived prefix
+    still anchors the clock after a compaction: the live tail of a compacted
+    run begins at the anchor markers, so a live-only read restarts the
+    silence clock from compaction time and a run silent for hours reads
+    healthy (#2088, the same archive-blindness family as #553 and #1072,
+    but in the measurement itself rather than the surrounding counts). A
+    store that cannot serve its archive degrades to the live tail rather
+    than failing the read.
+    """
     try:
-        events = storage.read_events(run_id)
+        events = storage.read_all_events(run_id)
     except Exception:
-        return None
-    if not events:
-        return None
-    return events[-1].timestamp  # type: ignore[no-any-return]
+        try:
+            events = storage.read_events(run_id)
+        except Exception:
+            return None
+    for ev in reversed(events):
+        if _counts_as_activity(ev):
+            return ev.timestamp  # type: ignore[no-any-return]
+    return None
 
 
 def _has_open_claim(storage: Any, run_id: str) -> bool:
