@@ -566,9 +566,15 @@ def settle_authority(
     *,
     dry_run: bool = False,
 ) -> AuthoritySettleReport:
-    """Probe one authority and settle via AUTHORITY_RECONCILED when definitive."""
+    """Probe one authority and settle via AUTHORITY_RECONCILED when definitive.
+
+    The payload is validated through the published ``AuthorityReconciled``
+    model before it is appended, so the writer and the payload contract
+    cannot drift apart (issue #2084): every event this function emits is one
+    ``AuthorityReconciled.model_validate`` away from reading back cleanly.
+    """
     from continuum.events import EventType
-    from continuum.models import Origin
+    from continuum.models import AuthorityReconciled, Origin, utcnow
 
     payload: dict[str, Any] = {"authority_id": authority_id}
     # Full history, not the live tail: the AUTHORITY_CONSUMED row can predate a
@@ -607,12 +613,13 @@ def settle_authority(
     storage.append_event(
         run_id,
         EventType.AUTHORITY_RECONCILED,
-        {
-            "authority_id": authority_id,
-            "valid": verdict,
-            "reason": detail,
-            "probed_payload": payload,
-        },
+        AuthorityReconciled(
+            authority_id=authority_id,
+            valid=verdict,
+            reason=detail,
+            probed_at=utcnow().isoformat(),
+            probed_payload=payload,
+        ).model_dump(mode="json"),
         source=Origin.DETERMINISTIC,
     )
     return AuthoritySettleReport(authority_id, verdict, detail, settled=True)

@@ -128,11 +128,21 @@ moved):
 ## 3. What unblocking writes
 
 A `true` verdict appends one `AUTHORITY_RECONCILED` event carrying the id, the
-verdict, and the probe detail, and clears the consumed mark: the next
-`collect_consumed_authorities` fold no longer contains the id, so the gate
-stops refusing it for prior consumption. A `false` or unknown verdict writes
-nothing. Reconciliation never invents validity; it only records what the probe
-said, with the probe's words in the payload for audit.
+verdict, the probe detail, and the moment the probe ran (`probed_at`), and
+clears the consumed mark: the next `collect_consumed_authorities` fold no
+longer contains the id, so the gate stops refusing it for prior consumption.
+A `false` or unknown verdict writes nothing. Reconciliation never invents
+validity; it only records what the probe said, with the probe's words in the
+payload for audit.
+
+The payload is built through the published `AuthorityReconciled` model
+(`src/continuum/models.py`), so the event and the payload contract cannot
+drift apart: validating a reconciled event through that model is guaranteed
+to succeed. The event also carries `probed_payload`, the consumption context
+the probe was handed (which consumption, via which action, at which
+sequence), so the verdict stays linked to the `AUTHORITY_CONSUMED` row even
+after that row compacts out of the live tail. Events appended before
+`probed_at` was recorded carry no timestamp and still validate.
 
 ## Rules worth knowing
 
