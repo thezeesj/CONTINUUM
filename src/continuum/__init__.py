@@ -150,6 +150,7 @@ from continuum.state import (
     project_incremental,
     render_diff,
     state_fingerprint,
+    weakest_origin_over,
 )
 from continuum.state.validator import StateValidator, ValidationOutcome, validate_state
 from continuum.storage import (
@@ -259,6 +260,7 @@ __all__ = [
     "project_incremental",
     "render_diff",
     "state_fingerprint",
+    "weakest_origin_over",
     # storage
     "CheckpointNotFound",
     "ConcurrentWriteError",

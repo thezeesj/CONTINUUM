@@ -37,7 +37,13 @@ from continuum.models import (
     SemanticState,
     StateStatus,
 )
-from continuum.state.semantic import ProjectionReport, _as_str_list, project_incremental
+from continuum.provenance_map import derived_origin
+from continuum.state.semantic import (
+    ProjectionReport,
+    _as_str_list,
+    _weakest_from_state,
+    project_incremental,
+)
 
 __all__ = [
     "ExtractionContext",
@@ -51,12 +57,42 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class ExtractionContext:
-    """Everything an extractor is allowed to look at."""
+    """Everything an extractor is allowed to look at.
+
+    ``weakest_seed`` is the trust watermark the base's own fold held, which a
+    base state cannot reconstruct on its own (#1933, #2039): the fold weakens
+    the watermark from *every* consumed event, non-projecting ones included,
+    and half the projecting components carry no provenance at all. A caller
+    that holds the log should pass ``weakest_origin_over`` of the events the
+    base folded, which reproduces a fresh read's watermark exactly; ``None``
+    keeps the per-fact approximation, i.e. today's behaviour for callers with
+    no log.
+    """
 
     run_id: str
     trajectory: Sequence[Event]
     environment: EnvironmentSnapshot | None = None
     base: SemanticState | None = None
+    weakest_seed: Any | None = None
+
+
+def _accumulated_weakest(context: ExtractionContext) -> Any | None:
+    """The watermark a deterministic fold of ``context`` ends at (#2039).
+
+    ``project_incremental`` seeds the fold from ``weakest_seed`` when the
+    caller supplied one and from the base's per-fact provenances otherwise,
+    then weakens the watermark from every event it folds. Downstream stages
+    of a composite must be seeded with that result rather than with the
+    caller's seed, which the first stage's fold has already weakened further.
+    """
+    seed = context.weakest_seed
+    if seed is None:
+        seed = _weakest_from_state(context.base)
+    candidates: list[Origin] = []
+    if seed is not None:
+        candidates.append(seed)
+    candidates.extend(event.source for event in context.trajectory)
+    return derived_origin(candidates) if candidates else None
 
 
 @runtime_checkable
@@ -73,7 +109,10 @@ class StateExtractor(Protocol):
         """Derive semantic state from an extraction context.
 
         Implementations must be side-effect free and should fold events onto
-        any base state supplied in ``context``.
+        any base state supplied in ``context``. Implementations that fold
+        events onto ``context.base`` must honour ``context.weakest_seed`` when
+        stamping derived provenance, so a base-plus-tail read never asserts a
+        fact at higher trust than a fresh read of the same log (#2039).
         """
         ...
 
@@ -90,14 +129,19 @@ class DeterministicExtractor:
         """Fold recorded events into deterministic semantic state.
 
         Applies events from ``context.trajectory`` onto ``context.base`` (or
-        from scratch when base is absent) using :func:`project_incremental`.
-        Updates :attr:`last_report` with projection metrics and returns the
-        resulting state.
+        from scratch when base is absent) using :func:`project_incremental`,
+        seeding the trust watermark from ``context.weakest_seed`` so a
+        base-plus-tail read stamps derived trust exactly like a fresh read of
+        the same log (#2033). Without a seed the fold falls back to the base's
+        per-fact provenances, which can only approximate the watermark a live
+        fold held. Updates :attr:`last_report` with projection metrics and
+        returns the resulting state.
         """
         state, report = project_incremental(
             context.run_id,
             context.trajectory,
             base=context.base,
+            weakest_seed=context.weakest_seed,
         )
         self.last_report = report
         return state
@@ -248,17 +292,32 @@ class CompositeExtractor:
         The first extractor receives the full context and folds recorded
         trajectory events. Downstream extractors receive the accumulated state
         as ``context.base`` with an empty trajectory, preventing double-counting
-        of events while allowing successive enrichments.
+        of events while allowing successive enrichments, and are seeded with the
+        watermark that accumulated state holds: the first stage's fold has
+        weakened the caller's seed by every event it consumed, and a downstream
+        extractor that stamps derived provenance must not launder that away
+        (#2039). As the pipeline advances across multi-stage chains, the seed
+        incorporates the evolving state's weakest origin to maintain
+        monotonicity across intermediate stages.
         """
         first, *rest = self._extractors
         state = first.extract(context)
+        weakest_seed = _accumulated_weakest(context)
         for extractor in rest:
+            state_weakest = _weakest_from_state(state)
+            if state_weakest is not None:
+                weakest_seed = (
+                    derived_origin([weakest_seed, state_weakest])
+                    if weakest_seed is not None
+                    else state_weakest
+                )
             state = extractor.extract(
                 ExtractionContext(
                     run_id=context.run_id,
                     trajectory=(),
                     environment=context.environment,
                     base=state,
+                    weakest_seed=weakest_seed,
                 )
             )
         return state

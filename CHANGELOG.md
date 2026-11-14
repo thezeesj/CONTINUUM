@@ -10,16 +10,19 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
-- **Coverage for EnvironmentDiff properties, rendering, and diff_environments
-  edge cases (#1991).**
-  New `tests/test_environment_diff.py` asserts `ResourceDelta.breaking` and
-  `render()` across all five change variants, the `EnvironmentDiff` filtered
-  subsets (`changed`, `unknown`, `breaking`, `stable`), `for_resource` lookup,
-  and all three `render()` branches, and drives `diff_environments` through
-  missing snapshots, added and removed resources, `UNKNOWN_VERSION` metadata
-  reason precedence, resources with no version or checksum on either side, and
-  checksum-preferred-over-version identity. The module goes from 48% to full
-  statement and branch coverage under this file. Tests only, no runtime change.
+- **Coverage for the dashboard's advisory guards, HITL fallbacks, and POST
+  refusals (#1924).**
+  `tests/test_dashboard.py` and `tests/test_dashboard_hitl.py` now drive the
+  advisory panels (`_advisory_trust_html`, `_liveness_html`, `_pins_html`)
+  through projected and stored versions, unfoldable logs, failing reads, and a
+  pin whose marker is missing from the reconstructed context; render the
+  request_human confirm form with and without pending settle rows; tolerate
+  `read_archived_events` and ledger-read failures; exercise GET /runs/ routing
+  (200 and the 404 for unknown runs); cover `serve_dashboard`'s serve-then-close
+  lifecycle; and refuse POSTs with a negative Content-Length, no Content-Length
+  at all, a truncated oversize body, and a body that exceeds the drain limit.
+  The module goes from 49 missed statements to none under these suites. Tests
+  only, no runtime change.
 
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
@@ -291,6 +294,26 @@ Test counts: ~4400 collected on a minimal env.
   `storage.storage_dir`, and degrades gracefully when no dependency budgets
   are configured.
 ### Fixed
+
+- **The StateExtractor seam can carry the trust watermark its base folded
+  with (#2039).** `#1933` seeded the watermark for the two shipped resume
+  paths, but the exported extraction seam laundered the same way with no way
+  to do the right thing: `ExtractionContext` carried no field for the seed,
+  so `DeterministicExtractor.extract` folded onto the base unseeded and fell
+  back to the per-fact approximation, stamping a derived fact appended after
+  a weak non-projecting event DETERMINISTIC where a fresh read of the same
+  log stamped it EXTERNAL_AGENT, breaking the incremental==full invariant on
+  the seam `plugins/seams.py` documents as the extension point.
+  `ExtractionContext` takes an optional `weakest_seed`, which
+  `DeterministicExtractor` passes through to `project_incremental`, and
+  `CompositeExtractor` forwards the accumulated watermark between stages
+  rather than the caller's seed, which the first stage's fold has already
+  weakened further. `weakest_origin_over` is exported from `continuum.state`
+  and `continuum` so a caller holding the log can compute the exact seed next
+  to the seam it feeds. Callers without a log keep today's behaviour; the
+  regression is latent (no in-repo caller passes a base with a non-empty
+  trajectory) but the seam is public API whose docstring advertises the
+  base-plus-tail shape.
 
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
