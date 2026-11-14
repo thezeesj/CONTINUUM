@@ -10,6 +10,16 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Coverage for evidence export observation, record-only checkpoint, and
+  verification failure paths (#1989).**
+  `tests/test_interchange_evidence.py` now exports observation event types
+  (`STATE_VALIDATED`, `PERCEPTION_OBSERVED`, `TOOL_COMPLETED`) and asserts the
+  emitted `Observation` primitive carries `observed_at`, exports a checkpoint
+  record stored without its `STATE_CHECKPOINTED` event through
+  `EvidencePrimitive.for_checkpoint` with contiguous sequence numbers, and
+  drives `verify_export` to False on a broken `prev_hash` link, a
+  `content_hash` that disagrees with the recomputed `stable_hash`, and
+  signature inputs `stable_hash` raises on. Tests only, no runtime change.
 - **Coverage for the dashboard's advisory guards, HITL fallbacks, and POST
   refusals (#1924).**
   `tests/test_dashboard.py` and `tests/test_dashboard_hitl.py` now drive the
