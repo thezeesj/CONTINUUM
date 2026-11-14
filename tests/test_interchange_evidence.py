@@ -214,6 +214,29 @@ def test_verify_export_rejects_tampered_readable_fields() -> None:
         assert verify_export(tampered) is False
 
 
+def test_verify_export_event_checkpoint_integrity_hash_limitation() -> None:
+    # The event-backed checkpoint primitive's integrity_hash mirrors the
+    # checkpoint record the exporter looked up, and the event's signature
+    # inputs do not anchor it, so verify_export cannot cross-check it on this
+    # path. This pins that known limitation: a receiver holding the checkpoint
+    # records must compare it against StateCheckpoint.integrity_hash itself.
+    with SQLiteStorage(":memory:") as store:
+        store.create_run(Run(run_id="run_1", goal="test goal"))
+        store.append_event("run_1", EventType.RUN_STARTED, {"goal": "test goal"})
+        store.append_event(
+            "run_1",
+            EventType.STATE_CHECKPOINTED,
+            {"checkpoint_id": "cp_1", "version": 1, "trigger": "step"},
+        )
+        primitives = export_evidence(store, "run_1")
+        assert verify_export(primitives) is True
+
+        cp_idx = next(i for i, p in enumerate(primitives) if p.kind == "checkpoint")
+        tampered = [p.model_dump() for p in primitives]
+        tampered[cp_idx]["integrity_hash"] = "0" * 64
+        assert verify_export(tampered) is True
+
+
 def test_verify_export_checkpoint_record_primitive() -> None:
     from continuum.models import Goal, StateCheckpoint
     from continuum.state.semantic import SemanticState

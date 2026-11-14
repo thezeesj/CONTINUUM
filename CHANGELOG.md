@@ -331,6 +331,25 @@ Test counts: ~4400 collected on a minimal env.
   trajectory) but the seam is public API whose docstring advertises the
   base-plus-tail shape.
 
+- **Evidence export verification cross-checks readable fields and stream
+  bounds (#2083).** `verify_export` previously verified only sequence
+  contiguity, `prev_hash` continuity, and
+  `stable_hash(signature_inputs) == content_hash`, so any readable
+  convenience field on a primitive (`payload`, `origin`, `timestamp`,
+  `event_id`, `event_type`, `run_id`, `observed_at`, relation endpoints,
+  checkpoint fields) could be altered without failing verification, and a
+  tail-truncated export read as a consistent prefix. It now cross-checks
+  every readable duplicated field against its anchored counterpart in
+  `signature_inputs` for both event-backed primitives and standalone
+  checkpoint records, and accepts `expected_count` and `expected_head` so a
+  receiver detects truncation against the store's head. Relation endpoints
+  and checkpoint metadata are read through helpers shared with construction,
+  so the readable fields and their expected values cannot drift apart
+  (#1155). Known limitation: an event-backed checkpoint primitive's
+  `integrity_hash` is anchored nowhere on the event path, so it is only
+  cross-checked on the record-backed path, where it must equal
+  `content_hash`.
+
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
   which is never true for a `postgresql://` URL, so the daemon silently bound
