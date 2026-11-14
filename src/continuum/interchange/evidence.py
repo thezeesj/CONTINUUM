@@ -112,12 +112,13 @@ class EvidencePrimitive(BaseModel):
         if kind == "relation":
             return Relation.from_event(ev, **common)
         if kind == "checkpoint":
-            cid = ev.payload.get("checkpoint_id")
-            record = known.get(cid) if isinstance(cid, str) else None
+            raw_cid = ev.payload.get("checkpoint_id")
+            record = known.get(raw_cid) if isinstance(raw_cid, str) else None
+            cid, version, trigger = _checkpoint_meta(ev.payload, ev.event_id)
             return Checkpoint(
-                checkpoint_id=cid if isinstance(cid, str) else ev.event_id,
-                version=ev.payload.get("version", 0),
-                trigger=ev.payload.get("trigger", "unknown"),
+                checkpoint_id=cid,
+                version=version,
+                trigger=trigger,
                 integrity_hash=record.integrity_hash if record is not None else None,
                 **common,
             )
@@ -187,26 +188,12 @@ class Relation(EvidencePrimitive):
     def from_event(cls, ev: Event, **common: Any) -> Relation:
         """Build a relation primitive, guessing its endpoints from the payload.
 
-        A dependency edge's endpoints are spelled differently per event family
-        (``resource`` for a declaration, ``decision_id`` / ``finding_id`` for
-        those), so this is the one place primitive construction inspects the
-        payload instead of copying it. Keeping it next to the fields it fills
-        means a new event family that spells an endpoint differently lands in
-        the model rather than in an exporter dict nobody type-checks (#1155).
+        The guess lives in :func:`_relation_endpoints` so the readable fields
+        and the values :func:`verify_export` cross-checks them against stay
+        in one place (#1155).
         """
-        source_id = (
-            ev.payload.get("resource")
-            or ev.payload.get("decision_id")
-            or ev.payload.get("finding_id")
-        )
-        target_id = ev.payload.get("evidence") or ev.payload.get("depends_on")
-        if isinstance(target_id, list) and target_id:
-            target_id = target_id[0]
-        return cls(
-            source_id=str(source_id) if source_id else None,
-            target_id=str(target_id) if target_id else None,
-            **common,
-        )
+        source_id, target_id = _relation_endpoints(ev.payload)
+        return cls(source_id=source_id, target_id=target_id, **common)
 
 
 class Checkpoint(EvidencePrimitive):
@@ -278,6 +265,38 @@ def _classify(event: Event) -> Kind:
     if t in _RELATION_TYPES:
         return "relation"
     return "transition"
+
+
+def _relation_endpoints(payload: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """Guess a dependency edge's endpoints from the event payload.
+
+    The endpoints are spelled differently per event family (``resource`` for
+    a declaration, ``decision_id`` / ``finding_id`` for those), so this is the
+    one place primitive construction inspects the payload instead of copying
+    it. Sharing one helper between :meth:`Relation.from_event` and
+    :func:`verify_export` keeps the readable fields and the values they are
+    cross-checked against from drifting apart (#1155).
+    """
+    source = payload.get("resource") or payload.get("decision_id") or payload.get("finding_id")
+    target = payload.get("evidence") or payload.get("depends_on")
+    if isinstance(target, list) and target:
+        target = target[0]
+    return (str(source) if source else None, str(target) if target else None)
+
+
+def _checkpoint_meta(payload: Mapping[str, Any], event_id: Any) -> tuple[str, int, str]:
+    """Read a checkpoint primitive's (checkpoint_id, version, trigger) values.
+
+    The event payload names the checkpoint it logged and falls back to the
+    event's own id, and the version and trigger defaults match the record's
+    defaults. Sharing one helper between :meth:`EvidencePrimitive.for_event`
+    and :func:`verify_export` keeps construction and cross-checking in
+    agreement (#1155).
+    """
+    cid = payload.get("checkpoint_id")
+    if not isinstance(cid, str):
+        cid = event_id
+    return cid, payload.get("version", 0), payload.get("trigger", "unknown")
 
 
 def _common_fields(ev: Event, *, sequence: int, prev_hash: str | None) -> dict[str, Any]:
@@ -424,6 +443,13 @@ def verify_export(
     digest of signature_inputs, readable duplicated fields match their verified
     counterparts in signature_inputs, and stream boundaries match expected_count
     and expected_head if provided.
+
+    Known limitation: the event-backed checkpoint primitive's ``integrity_hash``
+    mirrors the checkpoint record the exporter looked up, and the event's
+    signature inputs do not anchor it, so it is only cross-checked on the
+    record-backed path (where it must equal ``content_hash``). A receiver that
+    also holds the checkpoint records should compare it against
+    ``StateCheckpoint.integrity_hash`` directly.
     """
     if expected_count is not None and len(primitives) != expected_count:
         return False
@@ -502,26 +528,16 @@ def verify_export(
                 ev_payload = sig.get("payload")
                 if not isinstance(ev_payload, Mapping):
                     return False
-                raw_source = (
-                    ev_payload.get("resource")
-                    or ev_payload.get("decision_id")
-                    or ev_payload.get("finding_id")
-                )
-                raw_target = ev_payload.get("evidence") or ev_payload.get("depends_on")
-                if isinstance(raw_target, list) and raw_target:
-                    raw_target = raw_target[0]
-                expected_source = str(raw_source) if raw_source else None
-                expected_target = str(raw_target) if raw_target else None
+                expected_source, expected_target = _relation_endpoints(ev_payload)
                 if p.get("source_id") != expected_source or p.get("target_id") != expected_target:
                     return False
             elif expected_kind == "checkpoint":
                 ev_payload = sig.get("payload")
                 if not isinstance(ev_payload, Mapping):
                     return False
-                cid = ev_payload.get("checkpoint_id")
-                expected_cid = cid if isinstance(cid, str) else sig.get("event_id")
-                expected_version = ev_payload.get("version", 0)
-                expected_trigger = ev_payload.get("trigger", "unknown")
+                expected_cid, expected_version, expected_trigger = _checkpoint_meta(
+                    ev_payload, sig.get("event_id")
+                )
                 if p.get("checkpoint_id") != expected_cid:
                     return False
                 if p.get("version") != expected_version:
