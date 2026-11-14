@@ -281,15 +281,25 @@ Test counts: ~4400 collected on a minimal env.
   are configured.
 ### Fixed
 
-- **`render_dashboard` marks a PARTIAL component as degraded instead of
-  unknown (#2038).** `_STATUS_SYMBOL` mapped every `StateStatus` to a
-  dashboard marker except `PARTIAL`, so context-compacted evidence (folded
-  before a compaction boundary by `_apply_compaction_status`) rendered
-  through the `[??]` fallback, byte-identical to a genuinely `UNKNOWN` or
-  `REQUIRES_REVIEW` component: the one reading that means "we could not
-  tell". `PARTIAL` now renders `[~~]`, and a test pins the table against the
-  full enum so a status added later fails loudly until it gets a deliberate
-  marker instead of silently falling back.
+- **The StateExtractor seam can carry the trust watermark its base folded
+  with (#2039).** `#1933` seeded the watermark for the two shipped resume
+  paths, but the exported extraction seam laundered the same way with no way
+  to do the right thing: `ExtractionContext` carried no field for the seed,
+  so `DeterministicExtractor.extract` folded onto the base unseeded and fell
+  back to the per-fact approximation, stamping a derived fact appended after
+  a weak non-projecting event DETERMINISTIC where a fresh read of the same
+  log stamped it EXTERNAL_AGENT, breaking the incremental==full invariant on
+  the seam `plugins/seams.py` documents as the extension point.
+  `ExtractionContext` takes an optional `weakest_seed`, which
+  `DeterministicExtractor` passes through to `project_incremental`, and
+  `CompositeExtractor` forwards the accumulated watermark between stages
+  rather than the caller's seed, which the first stage's fold has already
+  weakened further. `weakest_origin_over` is exported from `continuum.state`
+  and `continuum` so a caller holding the log can compute the exact seed next
+  to the seam it feeds. Callers without a log keep today's behaviour; the
+  regression is latent (no in-repo caller passes a base with a non-empty
+  trajectory) but the seam is public API whose docstring advertises the
+  base-plus-tail shape.
 
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,
