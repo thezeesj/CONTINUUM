@@ -14,6 +14,7 @@ from continuum.state.semantic import (
     ProjectionReport,
     project,
     project_incremental,
+    weakest_origin_over,
 )
 from continuum.state.versioning import VersionChain, VersionEntry, state_fingerprint
 
@@ -33,4 +34,5 @@ __all__ = [
     "project_incremental",
     "render_diff",
     "state_fingerprint",
+    "weakest_origin_over",
 ]

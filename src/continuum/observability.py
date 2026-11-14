@@ -158,6 +158,9 @@ def reset_metrics() -> None:
 
 _STATUS_SYMBOL = {
     StateStatus.VALID: "[ok]",
+    # PARTIAL is degraded-but-known (context-compacted evidence), not unknown:
+    # the tilde marks "partially there" rather than "could not tell".
+    StateStatus.PARTIAL: "[~~]",
     StateStatus.STALE: "[--]",
     StateStatus.CONFLICTED: "[xx]",
     StateStatus.UNKNOWN: "[??]",
