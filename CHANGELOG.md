@@ -10,6 +10,12 @@ Test counts: ~4400 collected on a minimal env.
 
 ### Added
 
+- **Unit coverage for models bounded-collection validators, risk-detail clamp, and caused_by known-id checks (#1980).**
+  `tests/test_models.py` covers bounded-list validators (`ConsumedInputs`, `DecisionPayload`,
+  `ActionRecordPayload`), `validate_caused_by` known-id checks, `_risk_detail` folding and
+  depth/key clamps, `_risk_ts` parsing and fallback arms, `AuthorityConsumed` and
+  `AuthorityReconciled` bounds, `TrajectoryReport` digest matching, and semantic state lookups.
+  Tests only, no runtime change.
 - **Coverage for evidence export observation, record-only checkpoint, and
   verification failure paths (#1989).**
   `tests/test_interchange_evidence.py` now exports observation event types
