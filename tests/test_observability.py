@@ -254,3 +254,77 @@ def test_render_dashboard_contains_state_components_and_plan() -> None:
 def test_render_dashboard_marks_resume() -> None:
     out = render_dashboard(_decision(can_resume=True))
     assert "safe to resume:     yes" in out
+
+
+def test_status_symbol_covers_every_state_status() -> None:
+    """Every produced StateStatus must have an explicit dashboard marker.
+
+    A status absent from _STATUS_SYMBOL silently renders through the ``[??]``
+    fallback, which is the one reading that means "we could not tell". If a
+    status is added to the enum, this fails until the table grows an entry
+    with a deliberate marker (or an explicit alias to one).
+    """
+    from continuum.observability import _STATUS_SYMBOL
+
+    missing = [s for s in StateStatus if s not in _STATUS_SYMBOL]
+    assert not missing, f"statuses without a dashboard symbol: {missing}"
+
+
+def test_render_dashboard_marks_partial_as_degraded_not_unknown() -> None:
+    """A PARTIAL component must read as degraded, not as unknown (#2038).
+
+    _apply_compaction_status marks context-compacted evidence PARTIAL: real
+    history was folded, so the component is degraded-but-known. Before the fix
+    it rendered through the ``[??]`` fallback, byte-identical to a genuinely
+    unknown component, so a compacted run's dashboard could not distinguish
+    the two readings.
+    """
+    from continuum.observability import _STATUS_SYMBOL
+
+    partial_symbol = _STATUS_SYMBOL[StateStatus.PARTIAL]
+    unknown_symbol = _STATUS_SYMBOL[StateStatus.UNKNOWN]
+    assert partial_symbol != unknown_symbol, "PARTIAL must not share the unknown marker"
+
+    state = SemanticState(run_id="run_partial", goal=Goal(description="compacted"))
+    contract = RecoveryContract(
+        run_id="run_partial",
+        checkpoint_version=3,
+        recovery_status=RecoverySafety.BLOCKED,
+        verified=[],
+        invalidated=[],
+        required_actions=[],
+        next_allowed_action=None,
+    )
+    validation = ValidationOutcome(
+        state=state,
+        report=StateValidationResult(
+            run_id="run_partial",
+            checkpoint_version=3,
+            statuses=[
+                ComponentValidationEntry(
+                    component=Component.GOAL,
+                    status=StateStatus.PARTIAL,
+                    detail="evidence folded before compaction boundary",
+                ),
+            ],
+            safe_to_resume=False,
+        ),
+        environment_diff=EnvironmentDiff(),
+    )
+    restored = RestoredRun(
+        run_id="run_partial", state=state, checkpoint=None, pending_events=0, replayed=True
+    )
+    decision = RecoveryDecision(
+        run_id="run_partial",
+        mode=RecoveryMode.WAIT,
+        contract=contract,
+        plan=RepairPlan(),
+        validation=validation,
+        restored=restored,
+        uncertain_actions=(),
+        rationale=("goal evidence is partial",),
+    )
+
+    out = render_dashboard(decision)
+    assert f"  {partial_symbol} goal: partial" in out
+    assert f"  {unknown_symbol} goal: partial" not in out
