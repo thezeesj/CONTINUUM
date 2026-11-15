@@ -45,6 +45,14 @@ class HorizonScenario:
 #   RISK_OBSERVED event, the engine's abort path (recovery/risk.py).
 #   DECISION_INVALIDATED does not reach abort and is not used here.
 
+HORIZON_STRATEGIES: tuple[str, ...] = (
+    "raw_conversation_dump",
+    "langgraph_full_state_snapshot",
+    "continuum_semantic_checkpoint",
+    "semantic_plus_compaction",
+)
+
+
 HORIZON_SCENARIOS: list[HorizonScenario] = [
     HorizonScenario(
         name="steady_progress_year",
@@ -85,6 +93,14 @@ HORIZON_SCENARIOS: list[HorizonScenario] = [
         cycles=120,
         mutations={60: {"goal": "invalidated"}},
         labeled_by="author+reviewer consensus (resolved Author2 request_human -> abort)",
+    ),
+    HorizonScenario(
+        name="fm_bench_years",
+        description="FM-Bench years simulation (arXiv:2608.18423): 2020-01-01 +7d ticks, steady management, weekly compaction: should resume",
+        correct_mode="resume",
+        cycles=140,
+        mutations=None,
+        labeled_by="author+reviewer consensus",
     ),
 ]
 
