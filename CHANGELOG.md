@@ -22,6 +22,7 @@ Test counts: ~4800 collected on a minimal env.
   `benchmarks/horizon/` gains a `strategy` parameter for its scenarios, `run_fm_bench_simulation()`
   with a `SimulatedClock` (2020-01-01 start, +7d ticks, >100 checkpoint/compact/restore cycles),
   and `run_horizon_strategy_comparison()` judging all four strategies with the HORIZON judge.
+  Documentation test counts resynced to the tree (242 -> 250 test files, ~4400 -> ~4800 collected).
 - **Unit coverage for models bounded-collection validators, risk-detail clamp, and caused_by known-id checks (#1980).**
   `tests/test_models.py` covers bounded-list validators (`ConsumedInputs`, `DecisionPayload`,
   `ActionRecordPayload`), `validate_caused_by` known-id checks, `_risk_detail` folding and
