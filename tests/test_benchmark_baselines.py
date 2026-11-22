@@ -13,9 +13,12 @@ import pytest
 
 from continuum.benchmark.baselines import (
     BASELINES,
+    FOUR_STRATEGIES,
     ContinuumSemanticCheckpoint,
     FullTranscriptReplay,
+    LangGraphFullStateSnapshot,
     NaiveCheckpointing,
+    SemanticPlusCompaction,
     SimpleConversationSummarization,
     StructuredTaskSummary,
     baseline_by_name,
@@ -60,17 +63,54 @@ def test_an_unknown_baseline_name_raises_key_error() -> None:
         baseline_by_name("nope")
 
 
-def test_five_baselines_are_registered() -> None:
+def test_baselines_and_four_strategies_are_registered() -> None:
     assert {baseline.name for baseline in BASELINES} == {
         "full_transcript_replay",
+        "raw_conversation_dump",
         "simple_conversation_summarization",
         "naive_checkpointing",
         "structured_task_summary",
         "continuum_semantic_checkpoint",
+        "langgraph_full_state_snapshot",
+        "semantic_plus_compaction",
+    }
+    assert {baseline.name for baseline in FOUR_STRATEGIES} == {
+        "raw_conversation_dump",
+        "langgraph_full_state_snapshot",
+        "continuum_semantic_checkpoint",
+        "semantic_plus_compaction",
     }
     assert (
         ContinuumSemanticCheckpoint().name == "continuum_semantic_checkpoint"
     )  # sanity: the registry covers the class, not just the instance
+    assert LangGraphFullStateSnapshot().name == "langgraph_full_state_snapshot"
+    assert SemanticPlusCompaction().name == "semantic_plus_compaction"
+
+
+def test_baseline_aliases_resolve_properly() -> None:
+    assert baseline_by_name("raw_conversation_dump").name == "raw_conversation_dump"
+    assert baseline_by_name("raw_dump").name == "raw_conversation_dump"
+    assert baseline_by_name("replay").name == "full_transcript_replay"
+    assert baseline_by_name("replay").name == "full_transcript_replay"
+    assert baseline_by_name("langgraph_snapshot").name == "langgraph_full_state_snapshot"
+    assert baseline_by_name("langgraph").name == "langgraph_full_state_snapshot"
+    assert baseline_by_name("continuum").name == "continuum_semantic_checkpoint"
+    assert baseline_by_name("semantic_compacted").name == "semantic_plus_compaction"
+
+
+def test_langgraph_full_state_snapshot_captures_all_events() -> None:
+    storage = _store_with_events()
+    res = LangGraphFullStateSnapshot().run(storage, "run_1")
+    assert res["mode"] == "full_state_snapshot"
+    assert res["snapshot_events"] == "4"
+    assert int(res["snapshot_bytes"]) > 0
+
+
+def test_semantic_plus_compaction_runs_checkpoint_and_compact() -> None:
+    storage = _store_with_events()
+    res = SemanticPlusCompaction().run(storage, "run_1")
+    assert res["mode"] == "semantic_compacted"
+    assert res["checkpoint_id"]
 
 
 def test_full_transcript_replay_reports_the_event_count() -> None:

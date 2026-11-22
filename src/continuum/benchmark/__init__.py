@@ -130,6 +130,13 @@ SCENARIOS: dict[str, ScenarioSpec] = {
 
 METHODS = ("continuum", "replay", "naive_checkpoint")
 
+FOUR_STRATEGIES: tuple[str, ...] = (
+    "raw_conversation_dump",
+    "langgraph_full_state_snapshot",
+    "continuum_semantic_checkpoint",
+    "semantic_plus_compaction",
+)
+
 
 @dataclass(slots=True)
 class MethodResult:
@@ -246,9 +253,33 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
         )
 
         ledger = ActionLedger(store, run_id)
+        is_continuum_strategy = method in (
+            "continuum",
+            "continuum_semantic",
+            "continuum_semantic_checkpoint",
+            "semantic_compacted",
+            "semantic_plus_compaction",
+            "continuum_compacted",
+        )
+        is_compacted_strategy = method in (
+            "semantic_compacted",
+            "semantic_plus_compaction",
+            "continuum_compacted",
+        )
+        is_langgraph_strategy = method in (
+            "langgraph",
+            "langgraph_snapshot",
+            "langgraph_full_state_snapshot",
+        )
+        is_replay_strategy = method in (
+            "replay",
+            "raw_dump",
+            "raw_conversation_dump",
+        )
+
         manager = (
             CheckpointManager(store, policy=SemanticPolicy(progress_stride=total))
-            if method == "continuum"
+            if is_continuum_strategy
             else None
         )
 
@@ -257,14 +288,36 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
             if manager is not None:
                 manager.maybe_checkpoint(run_id, environment=env_v3)
             if i == side_at and not spec.interrupted:
-                _attempt_side_effect(ledger, effects, spec)
+                if is_langgraph_strategy:
+                    _write_effect(effects)
+                else:
+                    _attempt_side_effect(ledger, effects, spec)
         if spec.interrupted:
             # crash happens right after attempting the side effect
-            _attempt_side_effect(ledger, effects, spec)
+            if is_langgraph_strategy:
+                _write_effect(effects)
+            else:
+                _attempt_side_effect(ledger, effects, spec)
 
+        langgraph_snapshot_dict: dict[str, Any] | None = None
         if manager is not None:
             stored_checkpoint = manager.checkpoint(run_id, environment=env_v3)
+            if is_compacted_strategy:
+                store.compact_run(run_id)
             checkpoint_bytes_written = _checkpoint_bytes(stored_checkpoint)
+        elif is_langgraph_strategy:
+            pre_events = list(store.read_events(run_id))
+            langgraph_snapshot_dict = {
+                "channel_values": {
+                    "documents": list(range(crash_at)),
+                    "goal": "Process documents",
+                    "events": [dict(e.payload) for e in pre_events],
+                },
+                "step": crash_at,
+            }
+            checkpoint_bytes_written = len(
+                json.dumps(langgraph_snapshot_dict, sort_keys=True, default=str).encode("utf-8")
+            )
 
         env_after = (
             capture_environment(run_id, StaticProvider(dataset="v4")) if spec.env_change else env_v3
@@ -273,20 +326,30 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
         # --- phase 2: recover, then continue to the end ---------------------- #
         detected = False
         restored_state = None
-        if method == "replay":
+        if is_replay_strategy:
             done = 0
+            pre_events = list(store.read_events(run_id))
+            bytes_read_at_resume = _event_payload_bytes(pre_events)
+        elif is_langgraph_strategy:
+            done = crash_at
+            bytes_read_at_resume = checkpoint_bytes_written
+            revalidation_calls = 0
+            detected = False
+            if spec.interrupted:
+                _write_effect(effects)
         elif method == "naive_checkpoint":
             done = project(
                 run_id, store.read_events(run_id), on_unprojectable="degrade"
             ).progress.completed
-        else:  # continuum
+            bytes_read_at_resume = len(f"resume from {done}".encode())
+        else:  # continuum or semantic_compacted
             assert manager is not None and stored_checkpoint is not None
             restored = manager.restore(run_id)
             restored_state = restored.state
             done = restored_state.progress.completed
             # bytes read at resume is checkpoint body plus pending payloads
-            pending_after = store.read_events(
-                run_id, after_sequence=stored_checkpoint.state.source_sequence
+            pending_after = list(
+                store.read_events(run_id, after_sequence=stored_checkpoint.state.source_sequence)
             )
             bytes_read_at_resume = checkpoint_bytes_written + _event_payload_bytes(pending_after)
             # revalidation is a single validate_state call for continuum
@@ -301,15 +364,8 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
                     ProbeReconciler(lambda action: Resolution(occurred=True, external_id="481")),
                 )
 
-        # bytes read for the non-continuum strategies, computed at recovery time
-        if method == "replay":
-            pre_events = store.read_events(run_id)
-            bytes_read_at_resume = _event_payload_bytes(pre_events)
-        elif method == "naive_checkpoint":
-            bytes_read_at_resume = len(f"resume from {done}".encode())
-
         t0 = time.perf_counter()
-        if method == "replay":
+        if is_replay_strategy:
             for i in range(total):
                 store.append_event(run_id, EventType.WORK_COMPLETED, {"doc": i})
                 if i == side_at:
@@ -320,7 +376,7 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
         elapsed = time.perf_counter() - t0
 
         # --- measure --------------------------------------------------------- #
-        events = store.read_events(run_id)
+        events = list(store.read_events(run_id))
         docs = [e.payload["doc"] for e in events if e.type.value == "WORK_COMPLETED"]
         unique = len(set(docs))
         attempts = len(docs)
@@ -328,26 +384,27 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
         side_effects = sum(1 for line in Path(effects).read_text().splitlines() if line.strip())
         duplicate_side = max(0, side_effects - 1)
 
-        if method == "continuum":
-            ctx = build_recovery_context(restored_state, token_budget=4000)  # type: ignore[arg-type]
+        if is_continuum_strategy:
+            assert restored_state is not None
+            ctx = build_recovery_context(restored_state, token_budget=4000)
             context_tokens = estimate_tokens(ctx.render())
-        elif method == "replay":
+        elif is_langgraph_strategy:
+            context_tokens = estimate_tokens(
+                json.dumps(langgraph_snapshot_dict, indent=2, default=str)
+            )
+        elif is_replay_strategy:
             context_tokens = estimate_tokens(_render_log(events))
         else:
             context_tokens = estimate_tokens(f"resume from {done}")
 
         full_log_tokens = estimate_tokens(_render_log(events))
         if method == "naive_checkpoint":
-            # A bare progress count is not the actual information needed to resume,
-            # so a compression ratio here would overstate the method.
             compression = None
         else:
             compression = round(full_log_tokens / context_tokens, 2) if context_tokens else None
 
         resume_tokens = context_tokens
-        # replay_tokens_to_productive is the token cost to become productive
-        # For replay it is the full log, for continuum it is the briefing, deterministic
-        if method == "replay":
+        if is_replay_strategy:
             replay_tokens_to_productive = _estimate_resume_tokens(_render_log(events))
         else:
             replay_tokens_to_productive = resume_tokens
@@ -373,19 +430,35 @@ def _run_one(method: str, spec: ScenarioSpec, total: int, workdir: Path) -> Meth
         )
 
 
-def run_benchmark(total: int = 200) -> list[MethodResult]:
+def run_benchmark(
+    total: int = 200,
+    methods: Sequence[str] | None = None,
+) -> list[MethodResult]:
     """Run every (scenario, method) combination and return the measurements.
 
     Each combination gets a fresh database and effects log, so the runs do not
     interfere with one another.
     """
+    selected_methods = methods if methods is not None else METHODS
     results: list[MethodResult] = []
     with TemporaryDirectory() as tmp:
         base = Path(tmp)
         for spec in SCENARIOS.values():
-            for method in METHODS:
+            for method in selected_methods:
                 results.append(_run_one(method, spec, total, base / f"{spec.name}_{method}"))
     return results
+
+
+def run_four_strategies_benchmark(total: int = 200) -> list[MethodResult]:
+    """Run the 4 comparable strategies on identical scenarios (issue #569).
+
+    Strategies:
+    - raw_conversation_dump
+    - langgraph_full_state_snapshot
+    - continuum_semantic_checkpoint
+    - semantic_plus_compaction
+    """
+    return run_benchmark(total=total, methods=FOUR_STRATEGIES)
 
 
 # --- issue #6: idempotency under argument drift ------------------------------ #

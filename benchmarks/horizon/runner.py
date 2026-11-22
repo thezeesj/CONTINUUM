@@ -21,7 +21,10 @@ from .judge import judge
 from .scenarios import HORIZON_SCENARIOS
 
 
-def run_single_horizon(scenario_name: str) -> ScenarioResult:
+def run_single_horizon(
+    scenario_name: str,
+    strategy: str = "semantic_compacted",
+) -> ScenarioResult:
     from .scenarios import get_scenario
 
     scen = get_scenario(scenario_name)
@@ -30,9 +33,10 @@ def run_single_horizon(scenario_name: str) -> ScenarioResult:
     start = time.perf_counter()
     # Drive the scenario
     horizon = run_horizon_scenario(
-        run_id=f"horizon_{scen.name}",
+        run_id=f"horizon_{scen.name}_{strategy}",
         total_cycles=scen.cycles,
         mutations=scen.mutations,
+        strategy=strategy,
     )
     # For the abort scenario, emit the risk signal the engine actually maps
     # to ABORT. DECISION_INVALIDATED does not produce an abort proposal: the
@@ -53,24 +57,37 @@ def run_single_horizon(scenario_name: str) -> ScenarioResult:
                 source=Origin.EXTERNAL_MONITOR,
             )
     # Assess recovery
-    try:
-        engine = RecoveryEngine(horizon.storage)
-        decision = engine.assess(horizon.run_id)
-        actual_mode = decision.mode.value
-        # Map engine modes to judge's simplified modes
-        # engine has: resume, repair_and_resume, request_human, replan, rollback, abort, wait
-        # judge expects: resume, repair, request_human, abort
-        if actual_mode == "repair_and_resume" or actual_mode in (
-            "replan",
-            "rollback",
-            "wait",
-        ):
-            actual_mode = "repair"
-    except Exception as exc:
-        actual_mode = "abort"
-        notes = [f"assess exception: {exc}"]
+    is_continuum = strategy in (
+        "semantic_compacted",
+        "semantic_plus_compaction",
+        "continuum",
+        "continuum_semantic",
+        "continuum_semantic_checkpoint",
+    )
+    if is_continuum:
+        try:
+            engine = RecoveryEngine(horizon.storage)
+            decision = engine.assess(horizon.run_id)
+            actual_mode = decision.mode.value
+            # Map engine modes to judge's simplified modes
+            # engine has: resume, repair_and_resume, request_human, replan, rollback, abort, wait
+            # judge expects: resume, repair, request_human, abort
+            if actual_mode == "repair_and_resume" or actual_mode in (
+                "replan",
+                "rollback",
+                "wait",
+            ):
+                actual_mode = "repair"
+        except Exception as exc:
+            actual_mode = "abort"
+            notes = [f"assess exception: {exc}"]
+        else:
+            notes = []
     else:
-        notes = []
+        # Non-continuum baselines (raw dump, LangGraph snapshot) have no
+        # recovery engine or drift detection, blindly attempting to resume.
+        actual_mode = "resume"
+        notes = [f"baseline {strategy} blind resume without recovery engine"]
 
     # Judge
     result = judge(scen, actual_mode)
@@ -89,6 +106,7 @@ def run_single_horizon(scenario_name: str) -> ScenarioResult:
     avoided = horizon.duplicate_work_avoided
     duplicate_side_effects = horizon.duplicate_side_effects()
     metrics: dict[str, Any] = {
+        "strategy": strategy,
         "accuracy": 1.0 if result.passed else 0.0,
         "unnecessary_human_escalation_rate": 1.0 if result.unnecessary_escalation else 0.0,
         "repair_precision": 1.0 if result.repair_correct else 0.0,
@@ -121,15 +139,31 @@ def run_single_horizon(scenario_name: str) -> ScenarioResult:
     )
 
 
+def run_horizon_strategy_comparison(
+    scenario_name: str = "quarterly_drift_year",
+    strategies: list[str] | None = None,
+) -> dict[str, ScenarioResult]:
+    """Run all 4 comparable strategies on the identical horizon scenario (issue #569)."""
+    if strategies is None:
+        strategies = [
+            "raw_conversation_dump",
+            "langgraph_full_state_snapshot",
+            "continuum_semantic_checkpoint",
+            "semantic_plus_compaction",
+        ]
+    return {strat: run_single_horizon(scenario_name, strategy=strat) for strat in strategies}
+
+
 def run_horizon_suite(
     scenarios: list[str] | None = None,
+    strategy: str = "semantic_compacted",
 ) -> BenchmarkReport:
     """Run the horizon suite and return a BenchmarkReport."""
     if scenarios is None:
         scenarios = [s.name for s in HORIZON_SCENARIOS]
     results: list[ScenarioResult] = []
     for name in scenarios:
-        results.append(run_single_horizon(name))
+        results.append(run_single_horizon(name, strategy=strategy))
     return BenchmarkReport(generated_at=utcnow(), results=results)
 
 

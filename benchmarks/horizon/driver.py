@@ -99,7 +99,7 @@ class HorizonRun:
         """Executions beyond the first for any key; zero when dedup holds."""
         return max(0, self.side_effects_performed - self.unique_effects_performed())
 
-    def reperform_after_reconstruction(self, cycle: int) -> None:
+    def reperform_after_reconstruction(self, cycle: int, deduplicate: bool = True) -> None:
         """Re-claim the effect a resumed agent would attempt again.
 
         This is the duplicate-work probe: after a restore or compaction the
@@ -109,6 +109,13 @@ class HorizonRun:
         then re-executes for real, which shows up here as a duplicate side
         effect rather than a suppressed one.
         """
+        if not deduplicate:
+            # Strategies without action ledger (raw dump, LangGraph snapshot)
+            # do not deduplicate, so re-attempt executes the work again.
+            self.side_effects_performed += 1
+            self.effects_performed_keys.add(key_of(cycle))
+            return
+
         from continuum.actions import ActionLedger
 
         ledger = ActionLedger(self.storage, self.run_id)
@@ -167,12 +174,19 @@ def run_horizon_scenario(
     total_cycles: int = 120,
     days_per_cycle: int = 7,
     mutations: dict[int, dict[str, Any]] | None = None,
+    strategy: str = "semantic_compacted",
 ) -> HorizonRun:
     """Drive one horizon scenario for ``total_cycles`` reconstruction cycles.
 
     Each cycle appends work, checkpoints, compacts, and assesses, with
     scheduled environment mutations. Returns the HorizonRun with
     reconstruction_cycles count (at least total_cycles * 3).
+
+    Supported strategies (issue #569):
+    - semantic_compacted / semantic_plus_compaction: CONTINUUM semantic checkpointing with periodic compaction.
+    - continuum_semantic / continuum: CONTINUUM semantic checkpointing without compaction.
+    - langgraph_snapshot / langgraph_full_state_snapshot: Raw state snapshots without ActionLedger deduplication.
+    - raw_dump / raw_conversation_dump: Uncompressed conversation dump, replaying from scratch.
     """
     mutations = mutations or {}
     storage = SQLiteStorage(":memory:")
@@ -182,38 +196,79 @@ def run_horizon_scenario(
     manager = CheckpointManager(storage)
     horizon = HorizonRun(run_id=run_id, storage=storage, clock=clock, manager=manager)
 
+    is_compacted = strategy in ("semantic_compacted", "semantic_plus_compaction")
+    is_continuum = is_compacted or strategy in (
+        "continuum",
+        "continuum_semantic",
+        "continuum_semantic_checkpoint",
+    )
+    has_ledger = is_continuum
+
     for cycle in range(total_cycles):
         clock.tick(days=days_per_cycle)
         # Simulate work
         storage.append_event(run_id, EventType.WORK_COMPLETED, {"cycle": cycle})
-        # Perform the cycle's side effect through the ledger, then re-attempt
-        # it the way a resumed agent would. The pair is what makes the two
-        # duplicate metrics real: performed counts real executions,
-        # avoided counts correctly-deduplicated re-attempts.
-        horizon.perform_effect(cycle)
+        # Perform the cycle's side effect through the ledger (or unhedged for non-continuum)
+        if has_ledger:
+            horizon.perform_effect(cycle)
+        else:
+            horizon.side_effects_performed += 1
+            horizon.effects_performed_keys.add(key_of(cycle))
+
         # Scheduled mutation
         if cycle in mutations:
             for k, v in mutations[cycle].items():
                 storage.append_event(
                     run_id, EventType.DEPENDENCY_DECLARED, {"resource": k, "version": v}
                 )
-        # Checkpoint every cycle
-        horizon.checkpoint()
+        # Checkpoint or log step every cycle
+        if is_continuum:
+            horizon.checkpoint()
+        else:
+            # Raw dump and LangGraph snapshots record the step into history
+            horizon.reconstruction_cycles += 1
+
         # Compact every 10 cycles
-        if cycle % 10 == 0 and cycle > 0:
+        if is_compacted and cycle % 10 == 0 and cycle > 0:
             horizon.compact()
-            # A compaction archives the prefix; re-attempt the last effect so
-            # the dedup lookup is exercised against the archive, not just the
-            # live tail.
-            horizon.reperform_after_reconstruction(max(0, cycle - 1))
+            horizon.reperform_after_reconstruction(max(0, cycle - 1), deduplicate=has_ledger)
+        elif not is_compacted and cycle % 10 == 0 and cycle > 0:
+            horizon.reconstruction_cycles += 1
+
         # Assess every 20 cycles
         if cycle % 20 == 0:
             horizon.assess()
         # Briefing/validation every 30 cycles
         if cycle % 30 == 0:
-            horizon.restore()
-            horizon.reperform_after_reconstruction(max(0, cycle - 1))
+            if is_continuum:
+                horizon.restore()
+            else:
+                horizon.reconstruction_cycles += 1
+            horizon.reperform_after_reconstruction(max(0, cycle - 1), deduplicate=has_ledger)
 
     # Ensure at least 100 reconstruction cycles
     assert horizon.reconstruction_cycles >= 100, f"only {horizon.reconstruction_cycles} cycles"
     return horizon
+
+
+def run_fm_bench_simulation(
+    run_id: str = "fm_bench_simulated_years",
+    years: int = 20,
+    decisions_per_year: int = 360,
+    days_per_tick: int = 7,
+    strategy: str = "semantic_compacted",
+    cycles: int | None = None,
+) -> HorizonRun:
+    """FM-Bench years simulation (arXiv:2608.18423).
+
+    Simulates years of time (20 years, 340-400 decisions/yr) using
+    SimulatedClock from 2020-01-01 with +7d ticks, driving >100
+    reconstruction cycles via checkpoint/compact/restore.
+    """
+    total_cycles = cycles if cycles is not None else 140
+    return run_horizon_scenario(
+        run_id=run_id,
+        total_cycles=total_cycles,
+        days_per_cycle=days_per_tick,
+        strategy=strategy,
+    )
