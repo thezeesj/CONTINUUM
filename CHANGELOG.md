@@ -6,10 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Test counts: ~4400 collected on a minimal env.
+Test counts: ~4800 collected on a minimal env.
 
 ### Added
 
+- **Four comparable benchmark strategies and the FM-Bench years simulation (#569).**
+  `src/continuum/benchmark/baselines.py` defines `RawConversationDump`,
+  `LangGraphFullStateSnapshot`, and `SemanticPlusCompaction` alongside
+  `ContinuumSemanticCheckpoint`, exported as `FOUR_STRATEGIES`, and
+  `run_four_strategies_benchmark()` drives all four on identical scenarios with distinct
+  operational mechanics: the raw dump repeats work and side effects, the LangGraph full state
+  snapshot avoids repeating work but repeats interrupted side effects and is blind to
+  environment drift, the CONTINUUM semantic checkpoint deduplicates side effects through the
+  ActionLedger and detects drift, and semantic plus compaction adds log compaction.
+  `benchmarks/horizon/` gains a `strategy` parameter for its scenarios, `run_fm_bench_simulation()`
+  with a `SimulatedClock` (2020-01-01 start, +7d ticks, >100 checkpoint/compact/restore cycles),
+  and `run_horizon_strategy_comparison()` judging all four strategies with the HORIZON judge.
 - **Unit coverage for models bounded-collection validators, risk-detail clamp, and caused_by known-id checks (#1980).**
   `tests/test_models.py` covers bounded-list validators (`ConsumedInputs`, `DecisionPayload`,
   `ActionRecordPayload`), `validate_caused_by` known-id checks, `_risk_detail` folding and
