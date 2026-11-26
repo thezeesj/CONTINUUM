@@ -71,6 +71,20 @@ EXPECTED: dict[tuple[str, int], tuple[str, str]] = {
     ("src/continuum/models.py", 1550): ("EnvironmentSnapshot", "decl"),
     ("src/continuum/models.py", 1597): ("RecoveryContract", "decl"),
     ("src/continuum/models.py", 1685): ("StateCheckpoint", "decl"),
+    # Phase 5 and Phase 6 capabilities (issue #1993).
+    ("src/continuum/actions/authority.py", 25): ("record_authority_consumed", "decl"),
+    ("src/continuum/actions/grants.py", 89): ("SpentGrant", "decl"),
+    ("src/continuum/actions/grants.py", 100): ("scan_grants", "decl"),
+    ("src/continuum/recovery/escalation.py", 131): ("load_escalation_policy", "decl"),
+    ("src/continuum/recovery/escalation.py", 195): ("evaluate_action_risk", "decl"),
+    ("src/continuum/replayguard.py", 49): ("GuardKind", "decl"),
+    ("src/continuum/replayguard.py", 136): ("evaluate", "decl"),
+    ("src/continuum/replayguard.py", 270): ("protected_call", "decl"),
+    ("src/continuum/replayguard.py", 356): ("langgraph_protected_node", "decl"),
+    ("src/continuum/recovery/preconditions.py", 89): ("EditPoint", "decl"),
+    ("src/continuum/recovery/preconditions.py", 197): ("derive", "decl"),
+    ("src/continuum/serve/conformance.py", 46): ("WireConformanceReport", "decl"),
+    ("src/continuum/serve/conformance.py", 292): ("run_wire_conformance", "decl"),
 }
 
 
