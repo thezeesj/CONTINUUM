@@ -348,6 +348,14 @@ Test counts: ~4400 collected on a minimal env.
   `langgraph_protected_node` records the state fields its identity hash is
   derived from and accepts `similarity` too. Call sites that pass neither are
   unchanged.
+- **Reading a config file in a format the layer does not know fails by name
+  (#1992).** `_parse` resolved its per-format refusal wording through a dict
+  lookup *before* the try that guards the read, so an unknown format died as a
+  bare `KeyError` at the lookup itself -- before the `ConfigError` naming it
+  could fire. `read_document("ini", ...)` now raises the same
+  "unknown config format 'ini' (expected one of json, toml, yaml)" refusal
+  `render_document` already raised, so an install into a mis-spelled profile
+  reports the profile name instead of a traceback.
 
 - **The daemon's active-run probe and detached startup deadline work on
   server-backed storage (#1855).** The probe gated on `Path(db).exists()`,

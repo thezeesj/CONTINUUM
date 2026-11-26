@@ -14,8 +14,10 @@ that the format is unsupported.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -337,6 +339,205 @@ def test_reading_toml_never_needs_a_writer() -> None:
     assert parsed == {"mcp_servers": {"x": {"command": "c"}}}
 
 
+def test_reading_a_toml_file_goes_through_tomllib_itself(tmp_path: Path) -> None:
+    """The lazy writer never enters a read: ``read_document`` reads TOML."""
+    settings = tmp_path / "config.toml"
+    settings.write_text('[mcp_servers.x]\ncommand = "c"\n', encoding="utf-8")
+
+    assert configfmt.read_document("toml", settings) == {"mcp_servers": {"x": {"command": "c"}}}
+
+
+def test_an_unsupported_format_is_refused_by_name(tmp_path: Path) -> None:
+    """A format the layer does not know is named, next to the ones it does."""
+    settings = tmp_path / "config.ini"
+    settings.write_text("[mcp_servers]\n", encoding="utf-8")
+
+    with pytest.raises(configfmt.ConfigError) as excinfo:
+        configfmt.read_document("ini", settings)
+
+    assert str(excinfo.value) == "unknown config format 'ini' (expected one of json, toml, yaml)"
+
+
+@pytest.mark.parametrize(
+    ("fmt", "text", "label"),
+    [
+        pytest.param("json", "[1, 2, 3]", "a JSON object", id="json-list"),
+        pytest.param("json", '"a string"', "a JSON object", id="json-scalar"),
+        pytest.param("yaml", "- one\n- two\n", "a YAML mapping", id="yaml-list"),
+        pytest.param("yaml", "42", "a YAML mapping", id="yaml-scalar"),
+    ],
+)
+def test_a_document_that_is_not_a_mapping_is_refused(
+    fmt: str, text: str, label: str, tmp_path: Path
+) -> None:
+    """A structured file this tool cannot model is reported, never replaced.
+
+    TOML is absent from the params on purpose: ``tomllib`` always produces a
+    table at the root, so the non-mapping branch cannot be reached through it.
+    The check itself is shared by every format, so JSON and YAML pin it.
+    """
+    settings = tmp_path / f"config.{fmt}"
+    settings.write_text(text, encoding="utf-8")
+
+    with pytest.raises(configfmt.ConfigError) as excinfo:
+        configfmt.read_document(fmt, settings)
+
+    assert str(excinfo.value) == f"{settings} does not contain {label}; refusing to edit it"
+
+
+@needs_yaml
+def test_a_yaml_document_holding_only_an_explicit_null_is_refused(tmp_path: Path) -> None:
+    """``---`` parses to None but is not blank, so it is not folded to empty."""
+    settings = tmp_path / "config.yaml"
+    settings.write_text("---\n", encoding="utf-8")
+
+    with pytest.raises(configfmt.ConfigError) as excinfo:
+        configfmt.read_document("yaml", settings)
+
+    assert str(excinfo.value) == f"{settings} is empty; refusing to edit it"
+
+
+@needs_yaml
+def test_an_uncommented_yaml_file_is_still_rewritable(tmp_path: Path) -> None:
+    """The comment guard checks the file; it does not assume one is there.
+
+    A clean existing file must still be writable, or the guard would have
+    become a blanket refusal on every YAML host with a settings file. The
+    write replaces the whole document, so the read-merge-write flow an
+    install actually takes is what has to keep the operator's own keys.
+    """
+    settings = tmp_path / "config.yaml"
+    settings.write_text("other: 1\n", encoding="utf-8")
+
+    data = configfmt.read_document("yaml", settings)
+    LIST_SPLIT.put(data, "local", Path("/proj"), SPEC)
+    configfmt.write_document("yaml", settings, data)
+
+    reparsed = configfmt.read_document("yaml", settings)
+    assert reparsed["other"] == 1
+    assert "mcpServers" in reparsed
+
+
+def test_an_uncommented_toml_file_is_still_rewritable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same guard on the TOML side, through the writer the import resolves."""
+    settings = tmp_path / "config.toml"
+    settings.write_text("other = 1\n", encoding="utf-8")
+
+    writer = _RecordingWriter()
+    with _tomli_w_resolved_to(writer, monkeypatch):
+        data = configfmt.read_document("toml", settings)
+        DICT_SPLIT.put(data, "local", Path("/proj"), SPEC)
+        configfmt.write_document("toml", settings, data)
+
+    assert settings.read_text(encoding="utf-8") == _RENDERED_BY_THE_WRITER
+    assert writer.seen == [
+        {
+            "other": 1,
+            "projects": {str(Path("/proj")): {"mcpServers": {SPEC.name: DICT_SPLIT.entry(SPEC)}}},
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("data", "null_at"),
+    [
+        pytest.param({"a": [None]}, "a[0]", id="null-in-a-list"),
+        pytest.param({"a": [{"b": [None]}]}, "a[0].b[0]", id="null-deeper-in-a-list"),
+    ],
+)
+def test_a_null_inside_a_list_is_named_by_its_dotted_path(
+    data: dict[str, Any], null_at: str
+) -> None:
+    """TOML has no null, and one hiding inside a list is refused by path."""
+    with pytest.raises(configfmt.ConfigError) as excinfo:
+        configfmt.render_document("toml", data)
+
+    assert str(excinfo.value) == (
+        f"{null_at} is null, and TOML has no null to write it as; "
+        "removing the key first would change what the host reads"
+    )
+
+
+#: What the recording writer below answers every ``dumps`` call with. A fixed
+#: string the test can compare against: ``render_document`` returns what the
+#: writer produced, verbatim.
+_RENDERED_BY_THE_WRITER = "rendered-by-the-writer\n"
+
+
+class _RecordingWriter:
+    """Stands in for the optional ``tomli-w`` package.
+
+    Tomli-w is an install-time extra this layer deliberately does not depend
+    on, so a machine without it cannot exercise the dump itself. The module
+    the lazy import resolves to is all ``render_document`` ever asks of the
+    package, so substituting one records what it was handed and what it said.
+    """
+
+    def __init__(self) -> None:
+        self.seen: list[dict[str, Any]] = []
+
+    def dumps(self, data: dict[str, Any]) -> str:
+        self.seen.append(data)
+        return _RENDERED_BY_THE_WRITER
+
+
+@contextlib.contextmanager
+def _tomli_w_resolved_to(
+    writer: _RecordingWriter, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[_RecordingWriter]:
+    """Resolve ``import_module("tomli_w")`` to ``writer`` for the block."""
+    real_import_module = configfmt.importlib.import_module
+
+    def with_the_writer(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "tomli_w":
+            return writer
+        return real_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(configfmt.importlib, "import_module", with_the_writer)
+    yield writer
+
+
+def test_render_toml_delegates_the_dump_to_the_resolved_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dump is the imported module's, and its result is returned as-is."""
+    writer = _RecordingWriter()
+
+    with _tomli_w_resolved_to(writer, monkeypatch):
+        rendered = configfmt.render_document("toml", REGISTRATION)
+
+    assert rendered == _RENDERED_BY_THE_WRITER
+    assert writer.seen == [REGISTRATION]
+
+
+def test_a_missing_yaml_writer_is_reported_with_the_command_that_fixes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Writing YAML needs the same package reading it does, and says so.
+
+    The sibling test pins the read path; this one drives ``render_document``,
+    which is what an install into a Continue-shaped host actually takes.
+    """
+    real_import_module = configfmt.importlib.import_module
+
+    def without_yaml(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "yaml":
+            raise ImportError("No module named 'yaml'")
+        return real_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(configfmt.importlib, "import_module", without_yaml)
+
+    with pytest.raises(configfmt.ConfigError) as excinfo:
+        configfmt.render_document("yaml", REGISTRATION)
+
+    assert str(excinfo.value) == (
+        "reading and writing YAML needs the 'PyYAML' package, which is not "
+        'installed. Install it with: pip install "continuum-agent[mcp]"'
+    )
+
+
 # --------------------------------------------------------------------------- #
 # shapes
 # --------------------------------------------------------------------------- #
@@ -516,6 +717,37 @@ def test_a_shape_without_per_project_nesting_ignores_the_scope() -> None:
 
     assert list(data) == ["mcpServers"]
     assert len(data["mcpServers"]) == 1
+
+
+def test_find_returns_none_where_the_container_itself_is_absent() -> None:
+    """Nothing is filed under a name when the container does not exist yet.
+
+    For the nested shape the missing container is a nesting level deep; for
+    the flat one it is the servers key. Both must answer None rather than
+    raising, so a remove on a host that was never configured is a no-op.
+    """
+    assert DICT_SPLIT.find({}, "local", Path("/proj"), SPEC.name) is None
+    assert LIST_SPLIT.find({}, "local", Path("/proj"), SPEC.name) is None
+
+
+def test_drop_on_a_name_that_was_never_installed_changes_nothing() -> None:
+    """A removal finds nothing, reports False, and creates nothing doing it."""
+    data: dict[str, Any] = {}
+    assert DICT_SPLIT.drop(data, "local", Path("/proj"), SPEC.name) is False
+    # The search did not build the nesting levels it walked looking for it.
+    assert data == {}
+
+
+def test_prune_skips_a_level_that_already_emptied_itself() -> None:
+    """A key missing from its parent is a level already gone, not a stop.
+
+    The reverse walk may meet a level a preceding deletion has already
+    removed; that level is skipped and the one above it is the next
+    candidate, so a prune never stops short of the residue it exists to take.
+    """
+    data: dict[str, Any] = {"a": {"b": {}}}
+    configfmt._prune(data, ["a", "x"])
+    assert data == {"a": {"b": {}}}
 
 
 def test_argv_of_rejects_every_entry_shape_it_cannot_represent() -> None:

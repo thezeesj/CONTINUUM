@@ -147,7 +147,16 @@ def read_document(fmt: str, path: Path) -> dict[str, Any]:
 
 def _parse(fmt: str, text: str, path: Path) -> dict[str, Any]:
     """Parse ``text`` in ``fmt``, refusing anything that is not a mapping."""
-    cause = _ROOT_CAUSE[fmt]
+    try:
+        cause = _ROOT_CAUSE[fmt]
+    except KeyError as exc:
+        # Above the ``try`` below on purpose: without it a format this module
+        # does not know dies as a bare KeyError at the dict lookup before the
+        # refusal naming it can fire, and an install surfaces a traceback
+        # instead of the message an operator can act on.
+        raise ConfigError(
+            f"unknown config format {fmt!r} (expected one of {', '.join(FORMATS)})"
+        ) from exc
     try:
         if fmt == "json":
             data = json.loads(text)
@@ -165,10 +174,6 @@ def _parse(fmt: str, text: str, path: Path) -> dict[str, Any]:
                 data = yaml.safe_load(text)
             except yaml.YAMLError as exc:
                 raise ConfigError(f"{path} is not valid YAML ({exc}); refusing to edit it") from exc
-        else:
-            raise ConfigError(
-                f"unknown config format {fmt!r} (expected one of {', '.join(FORMATS)})"
-            )
     except ConfigError:
         raise
     except Exception as exc:  # tomllib.TOMLDecodeError, json.JSONDecodeError
