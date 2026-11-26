@@ -62,6 +62,15 @@ Test counts: ~4400 collected on a minimal env.
   `render_refusal_text`, preserved summary variants in `render_preserved_summary`
   and `render_precondition_text`, and internal assertions and anchor conversions in
   `check_merge_preconditions`. Brings `src/continuum/recovery/gate.py` to 100% coverage.
+- **Unit coverage for trajectory report window fallbacks, shrink loop, and idempotency (#1978).**
+  `tests/test_trajectory_report.py` covers anchor-parsing fallbacks, refusal
+  paths, and empty-run detection in `_last_compaction_window`, archive-merge
+  fallbacks and idempotent short-circuits in `record_trajectory_report` and
+  `maybe_generate_trajectory_report`, the byte-cap shrink loop and digest
+  recomputation in `build_trajectory_report`, and validation fallbacks in
+  the scan helpers (`is_quiet_window`, `_latest_actions`, `_total_attempts`,
+  `_top_failure_types`, `_attempts_in_window`, and `_history_window`). Tests
+  only, bringing `src/continuum/analysis/trajectory_report.py` to 100% coverage.
 
 - **Unit coverage for the ledger-anchored authorization id (#1951).**
   `tests/test_idempotency_ledger_resolution.py` drives
