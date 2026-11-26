@@ -699,3 +699,195 @@ def test_matched_by_similarity_cannot_pose_as_an_exact_duplicate(db: str) -> Non
     assert exact.matched_by_similarity is False
     assert exact.key == prior_key
     assert "matched by fuzzy similarity" not in exact.reason
+
+
+# --- protected-node claim evidence (issue #2031) --------------------------------- #
+
+
+_INVOICE_ARGS = {"invoice": "INV-001", "customer": "ACME"}
+
+
+def test_protected_call_records_the_calls_arguments_on_its_claim(db: str) -> None:
+    # Parity with the intercept path: a claim opened by
+    # continuum_intercept_action carries the call's arguments, while one opened
+    # by protected_call used to record {}, so two claims for the same kind of
+    # work carried different ledger rows.
+    kind, result = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="inv:2031",
+        fn=lambda: {"status": "sent"},
+        arguments=_INVOICE_ARGS,
+    )
+    assert kind is GuardKind.ALLOW and result == {"status": "sent"}
+    assert last_action(db).arguments == _INVOICE_ARGS
+
+
+def test_protected_call_without_arguments_keeps_an_empty_row(db: str) -> None:
+    # The default for a caller that has nothing to record stays exactly as it
+    # was: the opt-in is per call site, not a silent behaviour change.
+    protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="inv:2031-default",
+        fn=lambda: {"status": "sent"},
+    )
+    assert last_action(db).arguments == {}
+
+
+def test_the_explicit_key_still_governs_a_protected_claim_with_arguments(db: str) -> None:
+    # The arguments describe the work; the explicit key remains the identity,
+    # as for an intercept-path claim. Two calls under one key with different
+    # arguments must still dedupe rather than drift apart the way an
+    # argument-derived key would.
+    protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="inv:2031-idem",
+        fn=lambda: {"status": "sent"},
+        arguments={"invoice": "INV-001"},
+    )
+    kind, value = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="inv:2031-idem",
+        fn=lambda: {"status": "SHOULD_NOT_RUN"},
+        arguments={"invoice": "INV-999"},
+    )
+    assert kind is GuardKind.SKIP_DUPLICATE
+    assert value == {"status": "sent"}
+
+
+def test_a_similarity_opted_protected_call_answers_from_a_completed_claim(db: str) -> None:
+    # The hazard #1029 was wired to stop, seen through the wrapper: the same
+    # work claimed under protected_call, then requested again after a restore
+    # under a differently rendered key. With the arguments recorded the fuzzy
+    # backend recognises the repeat and the wrapper returns the journalled
+    # result; against an empty row it scored 0.0, the call was denied as
+    # unclaimed, a second claim opened and the side effect fired again.
+    from continuum.replay_similarity import SimilarityConfig
+
+    fired: list[int] = []
+
+    def effect() -> dict[str, object]:
+        fired.append(len(fired))
+        return {"status": "sent"}
+
+    fuzzy = SimilarityConfig(kind="fuzzy")
+    kind1, result1 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="pay INV-001",
+        fn=effect,
+        arguments=_INVOICE_ARGS,
+        similarity=fuzzy,
+    )
+    assert kind1 is GuardKind.ALLOW and result1 == {"status": "sent"}
+
+    kind2, result2 = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="settle outstanding amount for INV-001",
+        fn=effect,
+        arguments=_INVOICE_ARGS,
+        similarity=fuzzy,
+    )
+    assert kind2 is GuardKind.SKIP_DUPLICATE
+    assert result2 == {"status": "sent"}
+    assert len(fired) == 1, "the side effect must not fire a second time"
+
+
+def test_similarity_without_arguments_stays_on_the_exact_path(db: str) -> None:
+    # A caller that opts into semantic matching but records nothing to compare
+    # against gets no guess: the scan needs the call's own arguments to score,
+    # so the wrapper behaves as if similarity were not configured.
+    from continuum.replay_similarity import SimilarityConfig
+
+    protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="pay INV-001",
+        fn=lambda: {"status": "sent"},
+        arguments=_INVOICE_ARGS,
+    )
+    kind, _ = protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="settle outstanding amount for INV-001",
+        fn=lambda: {"status": "sent-again"},
+        similarity=SimilarityConfig(kind="fuzzy"),
+    )
+    assert kind is GuardKind.ALLOW, "no arguments to score means no semantic match"
+
+
+def test_a_protected_call_claim_feeds_fork_detection(db: str) -> None:
+    # detect_fork_candidates derives an action's identity tokens from its
+    # recorded arguments; against {} the neighbour scan saw only the
+    # external_id and never the resources the call actually touched, so work
+    # claimed under protected_call was invisible to fork detection (#259).
+    from continuum.recovery.fork import detect_fork_candidates
+
+    protected_call(
+        SQLiteStorage(db),
+        "run_1",
+        action_type="send_invoice",
+        key="inv:2031-fork",
+        fn=lambda: {"status": "sent"},
+        arguments=_INVOICE_ARGS,
+    )
+    with SQLiteStorage(db) as store:
+        neighbours = detect_fork_candidates(
+            action_type="send_invoice",
+            tool_input=_INVOICE_ARGS,
+            actions_by_key=ActionLedger(store, "run_1").folded(),
+        )
+    assert neighbours, "a denied call must see the resources the protected claim touched"
+    assert {"ACME", "INV-001"} <= set(neighbours[0].shared_tokens)
+
+
+def test_langgraph_protected_node_records_its_input_state(db: str) -> None:
+    # The state fields the decorator already hashes for the identity key are
+    # also what the claim records as its arguments, so a protected node's
+    # ledger row describes the input it acted on instead of an empty one.
+    node = langgraph_protected_node(SQLiteStorage(db), "run_1", key_fields=["invoice", "customer"])(
+        lambda state: {"status": "sent"}
+    )
+    node({"invoice": "INV-001", "customer": "ACME"})
+    assert last_action(db).arguments == {"invoice": "INV-001", "customer": "ACME"}
+
+
+def test_langgraph_protected_node_can_be_opted_into_similarity(db: str) -> None:
+    # Before #2031 a protected node could not opt into semantic matching at
+    # all: protected_call passed neither similarity nor arguments to
+    # evaluate. A re-render of the same intent after a restore, which hashes
+    # to a different identity key, now answers from the journalled result
+    # instead of re-firing the node.
+    from continuum.replay_similarity import SimilarityConfig
+
+    fired: list[int] = []
+
+    def send_invoice(state: object) -> dict[str, object]:
+        fired.append(len(fired))
+        return {"status": "sent"}
+
+    node = langgraph_protected_node(
+        SQLiteStorage(db),
+        "run_1",
+        key_fields=["invoice", "customer"],
+        similarity=SimilarityConfig(kind="fuzzy"),
+    )(send_invoice)
+
+    out1 = node({"invoice": "INV-001", "customer": "ACME"})
+    out2 = node({"invoice": "inv-001", "customer": "acme"})
+
+    assert out1 == {"status": "sent"}
+    assert out2 == {"replayed": True, "status": "sent"}
+    assert len(fired) == 1, "the re-rendered node must replay, not re-fire"
