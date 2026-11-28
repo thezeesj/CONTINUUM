@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Test counts: ~4800 collected on a minimal env.
+Test counts: ~5100 collected on a minimal env.
 
 ### Added
 
@@ -22,7 +22,11 @@ Test counts: ~4800 collected on a minimal env.
   `benchmarks/horizon/` gains a `strategy` parameter for its scenarios, `run_fm_bench_simulation()`
   with a `SimulatedClock` (2020-01-01 start, +7d ticks, >100 checkpoint/compact/restore cycles),
   and `run_horizon_strategy_comparison()` judging all four strategies with the HORIZON judge.
-  Documentation test counts resynced to the tree (242 -> 250 test files, ~4400 -> ~4800 collected).
+  `tests/test_benchmark_four_strategies.py` pins the horizon simulation's threshold boundaries
+  (the 100-reconstruction-cycle floor and its exact minimum parameter, the 52/53 weekly tick
+  year crossing) and the strategy comparators (canonical and alias baseline resolution, the
+  judge's pass/escalation/repair verdict edges, and metric parity across all four strategies).
+  Documentation test counts resynced to the tree (242 -> 257 test files, ~4400 -> ~5100 collected).
 - **Unit coverage for models bounded-collection validators, risk-detail clamp, and caused_by known-id checks (#1980).**
   `tests/test_models.py` covers bounded-list validators (`ConsumedInputs`, `DecisionPayload`,
   `ActionRecordPayload`), `validate_caused_by` known-id checks, `_risk_detail` folding and

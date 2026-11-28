@@ -96,7 +96,7 @@ Verifique:
 ```bash
 continuum --help                 # ponto de entrada CLI
 continuum-mcp --help             # ponto de entrada do servidor MCP (precisa de [mcp] ou [dev])
-pytest -q                        # ~4800 coletados, ~4,100 passando, ~0 pulados em um ambiente mínimo (as contagens exatas variam)
+pytest -q                        # ~5100 coletados, ~4,100 passando, ~0 pulados em um ambiente mínimo (as contagens exatas variam)
 ruff check src/ tests/ examples/ && ruff format --check src/ tests/ examples/
 mypy src/continuum               # os três portões que o CI exige
 ```
@@ -397,7 +397,7 @@ Esquema v6. SQLite é primário, Postgres verificado por CI. Um log, muitas proj
 
 ### Mapa de módulos, uma biblioteca, muitas superfícies
 
-O CONTINUUM é uma biblioteca (`src/continuum`, 153 módulos) mais uma suíte de testes grande (250 arquivos de teste, ~4800 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
+O CONTINUUM é uma biblioteca (`src/continuum`, 155 módulos) mais uma suíte de testes grande (257 arquivos de teste, ~5100 testes). Todos os módulos acrescentam e reproduzem um log de eventos encadeado:
 
 | Módulo | Papel |
 |:--|:--|
@@ -539,7 +539,7 @@ Todas as páginas em `docs/` e o raciocínio por trás de cada uma:
 
 No início de 2026 vi agentes de longa duração falharem na recuperação, não no raciocínio. Checkpoints eram tratados como prova para continuar, não como evidência a verificar. Pesquisando Temporal, LangGraph, ACRFence 2603.20625 e self conditioning 2509.09677, encontrei que a lacuna era um substrato de verificação portátil que pergunta, dado o estado no tempo T e o mundo como está agora, ainda é seguro continuar.
 
-Em três semanas construí o CONTINUUM a partir de um invariante, cada fato carrega sua origem. O resultado é um log encadeado com `verify()`, um ledger com deduplicação por chave estável, uma porta e um gateway que bloqueiam efeitos não reivindicados, e um motor de recuperação que sela um contrato. Cinco costuras expõem o mesmo log ao Claude Code, LangGraph, LangChain, OpenAI, HTTP e OpenTelemetry. Validado com mortes reais e ~2,809 testes, ele imprime `0 duplicatas` onde a reprodução ingênua imprime `50`.
+Em três semanas construí o CONTINUUM a partir de um invariante, cada fato carrega sua origem. O resultado é um log encadeado com `verify()`, um ledger com deduplicação por chave estável, uma porta e um gateway que bloqueiam efeitos não reivindicados, e um motor de recuperação que sela um contrato. Cinco costuras expõem o mesmo log ao Claude Code, LangGraph, LangChain, OpenAI, HTTP e OpenTelemetry. Validado com mortes reais e ~5,100 testes, ele imprime `0 duplicatas` onde a reprodução ingênua imprime `50`.
 
 O CONTINUUM foi criado por **Anandhu P Shaji** ([@Cyrax321](https://github.com/Cyrax321) · [LinkedIn](https://www.linkedin.com/in/anandhupshaji/)) e é mantido pelo criador original. É de código aberto sob [Apache-2.0](LICENSE). Contribuições da comunidade são bem-vindas via [CONTRIBUTING.md](CONTRIBUTING.md) e são creditadas em [AUTHORS.md](AUTHORS.md) e [graphs/contributors](https://github.com/Cyrax321/CONTINUUM/graphs/contributors).
 
