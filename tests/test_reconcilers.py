@@ -452,9 +452,7 @@ def _authority_probe_command(body: str) -> str:
     return f'"{sys.executable}" -c "print({inner})"'
 
 
-def test_authority_reconciled_payload_serialization_contract(
-    db: str, tmp_path: Path
-) -> None:
+def test_authority_reconciled_payload_serialization_contract(db: str, tmp_path: Path) -> None:
     """The AUTHORITY_RECONCILED event is the published model's own serialization (#2084).
 
     settle_authority used to append a hand-rolled payload the published
@@ -484,9 +482,7 @@ def test_authority_reconciled_payload_serialization_contract(
 
     with SQLiteStorage(db) as store:
         (event,) = [
-            e
-            for e in store.read_events("run_1")
-            if e.type is EventType.AUTHORITY_RECONCILED
+            e for e in store.read_events("run_1") if e.type is EventType.AUTHORITY_RECONCILED
         ]
     payload = dict(event.payload)
     # The published model accepts the event exactly as appended, and dumping
