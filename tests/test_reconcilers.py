@@ -8,17 +8,20 @@ auto-settled events, and the CLI's exit-code behaviour.
 
 from __future__ import annotations
 
+import datetime as _dt
 import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from continuum import reconcilers
 from continuum.actions import ActionLedger
+from continuum.actions.authority import record_authority_consumed
 from continuum.cli import ExitCode, main
 from continuum.events import EventType
-from continuum.models import Action, ActionStatus, Origin, Run
+from continuum.models import Action, ActionStatus, AuthorityReconciled, Origin, Run
 from continuum.reconcilers import (
     _AUTHORITY_VERDICT_CONTRACT,
     _DEFAULT_TIMEOUT,
@@ -30,6 +33,7 @@ from continuum.reconcilers import (
     load_reconcilers,
     probe_authority_verdict,
     probe_verdict,
+    settle_authority,
     settle_run,
 )
 from continuum.storage import SQLiteStorage
@@ -434,6 +438,101 @@ def test_settle_run_settles_archived_actions_after_compaction(db: str, tmp_path:
         folded = fold_action_events(store.read_all_events("run_1"))
     action = next(a for a in folded.values() if a.action_id == action_id)
     assert action.status is ActionStatus.COMPLETED
+
+
+def _authority_probe_command(body: str) -> str:
+    """A probe command that prints *body* on every shell the matrix runs.
+
+    ``echo`` with single quotes is a POSIX-ism: Windows cmd keeps the quotes
+    and the output stops parsing as JSON. The interpreter is already here,
+    so use it directly; backslash-escaped quotes survive both sh grouping
+    and the C runtime unescaping behind cmd.
+    """
+    inner = "'" + body.replace('"', '\\"') + "'"
+    return f'"{sys.executable}" -c "print({inner})"'
+
+
+def test_authority_reconciled_payload_serialization_contract(
+    db: str, tmp_path: Path
+) -> None:
+    """The AUTHORITY_RECONCILED event is the published model's own serialization (#2084).
+
+    settle_authority used to append a hand-rolled payload the published
+    AuthorityReconciled model rejects (extra_forbidden: probed_payload) while
+    the model's own probed_at stayed empty, so a verifier validating events
+    through the published models failed on every reconciled authority, and
+    nothing in-tree consumed the model to notice. The writer now builds the
+    payload through the model, and this pins that from the writer's side:
+    the appended dict is exactly a mode="json" dump of an AuthorityReconciled
+    instance, so the event on the wire and the published payload contract
+    cannot drift apart on any runtime in the CI matrix.
+
+    The probe prints its verdict through the interpreter itself rather than
+    a quoted ``echo`` for the same reason: the matrix runs Windows legs, and
+    a command written for one shell family fails on another (#842).
+    """
+    with SQLiteStorage(db) as store:
+        record_authority_consumed(
+            store, "run_1", "auth-contract-1", consumer_run_id="run_1", via_action_id="act-1"
+        )
+    probes = load_reconcilers(
+        registry(tmp_path, {"auth-contract-1": _authority_probe_command('{"valid": true}')})
+    )
+    with SQLiteStorage(db) as store:
+        report = settle_authority(store, "run_1", "auth-contract-1", probes)
+    assert report.settled is True
+
+    with SQLiteStorage(db) as store:
+        (event,) = [
+            e
+            for e in store.read_events("run_1")
+            if e.type is EventType.AUTHORITY_RECONCILED
+        ]
+    payload = dict(event.payload)
+    # The published model accepts the event exactly as appended, and dumping
+    # it back reproduces the payload field for field: what the hash chained
+    # audit trail keeps is the model's own serialization, not a lookalike.
+    model = AuthorityReconciled.model_validate(payload)
+    assert model.model_dump(mode="json") == payload
+    assert set(payload) == set(AuthorityReconciled.model_fields)
+    assert model.authority_id == "auth-contract-1"
+    assert model.valid is True
+    # The probe run is timestamped, and the consumption context the probe was
+    # handed rides along (#647), keeping the verdict linked to the
+    # AUTHORITY_CONSUMED row that spent the authority.
+    assert model.probed_at
+    assert _dt.datetime.fromisoformat(model.probed_at).tzinfo is not None
+    assert model.probed_payload is not None
+    assert model.probed_payload["authority_id"] == "auth-contract-1"
+    assert model.probed_payload["consumer_run_id"] == "run_1"
+    assert model.probed_payload["via_action_id"] == "act-1"
+
+
+def test_legacy_authority_reconciled_payloads_keep_validating() -> None:
+    """Pre-#2084 events carry probed_payload and no probed_at, and still validate.
+
+    Every reconciled event the writer has ever appended has that shape, and
+    today's writer cannot repair the past by changing what it appends now:
+    the published model must keep reading history, or a verifier folding an
+    existing audit trail fails on it.
+    """
+    legacy = AuthorityReconciled.model_validate(
+        {
+            "authority_id": "auth-legacy",
+            "valid": False,
+            "reason": "valid=false",
+            "probed_payload": {
+                "authority_id": "auth-legacy",
+                "consumer_run_id": "run_1",
+                "via_action_id": None,
+                "consumed_at": "2026-09-12T00:22:54+00:00",
+                "sequence": 3,
+            },
+        }
+    )
+    assert legacy.probed_at == ""
+    assert legacy.probed_payload is not None
+    assert legacy.probed_payload["sequence"] == 3
 
 
 # --- CLI ------------------------------------------------------------------------------ #
